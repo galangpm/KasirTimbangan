@@ -1,0 +1,12 @@
+{
+  "name": "Kasir Timbangan",
+  "short_name": "Kasir",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0ea5e9",
+  "icons": [
+    { "src": "/next.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/vercel.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
