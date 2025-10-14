@@ -10,7 +10,7 @@ const getErrorMessage = (e: unknown): string => {
 };
 
 // Tipe baris untuk hasil query
-type InvoiceRow = RowDataPacket & { id: string; created_at: string; payment_method: string | null };
+type InvoiceRow = RowDataPacket & { id: string; created_at: string; payment_method: string | null; notes: string | null };
 type InvoiceItemRow = RowDataPacket & {
   id: string;
   fruit: string;
@@ -28,7 +28,7 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
     const conn = await pool.getConnection()
     try {
       const [invRows] = await conn.query<InvoiceRow[]>(
-        `SELECT id, created_at, payment_method FROM invoices WHERE id = ? LIMIT 1`,
+        `SELECT id, created_at, payment_method, COALESCE(notes, NULL) AS notes FROM invoices WHERE id = ? LIMIT 1`,
         [id]
       )
       const inv = invRows[0]
@@ -83,16 +83,30 @@ export async function PATCH(req: NextRequest, context: { params: Promise<{ id: s
   const { id } = await context.params;
   try {
     const body = await req.json();
-    const { payment_method } = body || {} as { payment_method?: string };
-    if (!payment_method || !["cash", "card", "qr"].includes(payment_method)) {
+    const { payment_method, notes } = body || {} as { payment_method?: string; notes?: string };
+    if (!payment_method || !["cash", "card", "qr", "tester", "gift"].includes(payment_method)) {
       return NextResponse.json({ ok: false, error: "Metode pembayaran tidak valid" }, { status: 400 });
+    }
+    // Wajib notes untuk tester/hadiah
+    if ((payment_method === "tester" || payment_method === "gift") && (!notes || !String(notes).trim())) {
+      return NextResponse.json({ ok: false, error: "Catatan wajib diisi untuk metode Tester/Hadiah" }, { status: 400 });
     }
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
+      // Pastikan kolom notes ada
+      try {
+        const [cols] = await conn.query<RowDataPacket[]>(
+          `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'notes'`
+        );
+        if (!Array.isArray(cols) || cols.length === 0) {
+          await conn.query(`ALTER TABLE invoices ADD COLUMN notes TEXT NULL`);
+        }
+      } catch {}
+
       const [res] = await conn.query<ResultSetHeader>(
-        `UPDATE invoices SET payment_method = ? WHERE id = ?`,
-        [payment_method, id]
+        `UPDATE invoices SET payment_method = ?, notes = ? WHERE id = ?`,
+        [payment_method, notes ?? null, id]
       );
       conn.release();
       if ((res.affectedRows || 0) === 0) {

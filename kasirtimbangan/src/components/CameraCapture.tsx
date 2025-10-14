@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { useFlashStore } from "@/store/flashStore";
 
 export default function CameraCapture({
   onCaptured,
@@ -132,7 +133,7 @@ export default function CameraCapture({
           await vEl.play();
         }
       } catch {
-        alert("Tidak bisa mengakses kamera");
+        useFlashStore.getState().show("error", "Tidak bisa mengakses kamera");
       }
     })();
     return () => {
@@ -248,10 +249,10 @@ export default function CameraCapture({
     <div className="p-4">
       <div className="relative" ref={containerRef}>
         {mode === "camera" ? (
-          <video ref={videoRef} className="w-full rounded" playsInline muted />
+          <video ref={videoRef} className="w-full max-h-[60vh] object-contain rounded" playsInline muted />
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
-          <img ref={imgRef} src={uploadedUrl ?? undefined} alt="uploaded" className="w-full rounded" />
+          <img ref={imgRef} src={uploadedUrl ?? undefined} alt="uploaded" className="w-full max-h-[60vh] object-contain rounded" />
         )}
         {/* Penggelapan di luar kotak crop saat mode kamera */}
         {mode === "camera" && (

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { createPortal } from "react-dom";
 import PaymentModal from "@/components/PaymentModal";
 import { cacheGet, cacheUpdatePayment } from "@/utils/invoiceCache";
+import { useFlashStore } from "@/store/flashStore";
 
 // Tipe eksplisit untuk data invoice
 interface InvoiceListRow {
@@ -18,6 +19,7 @@ interface InvoiceHeader {
   id: string;
   created_at: string;
   payment_method: string | null;
+  notes?: string | null;
 }
 
 interface InvoiceItemRow {
@@ -77,7 +79,7 @@ export default function InvoicesPage() {
       setTotal(data.total || 0);
       setTotalPages(data.totalPages || 1);
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -149,7 +151,7 @@ export default function InvoicesPage() {
       setDetailData(data);
       setDetailId(id);
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     }
   };
 
@@ -158,24 +160,24 @@ export default function InvoicesPage() {
     setPayModalOpen(true);
   };
 
-  const onPayFromList = async (method: "cash" | "card" | "qr") => {
+  const onPayFromList = async (method: "cash" | "card" | "qr" | "tester" | "gift", notes?: string) => {
     if (!payModalInvoiceId) return;
     try {
       const res = await fetch(`/api/invoices/${payModalInvoiceId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ payment_method: method }),
+        body: JSON.stringify({ payment_method: method, notes: notes ?? undefined }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Gagal memperbarui pembayaran");
       // Update cache lokal agar status di modal/detail cepat berubah
-      try { cacheUpdatePayment(payModalInvoiceId, method); } catch {}
+      try { cacheUpdatePayment(payModalInvoiceId, method, notes ?? null); } catch {}
       setPayModalOpen(false);
       setPayModalInvoiceId(null);
       await fetchData();
-      alert("Status pembayaran diperbarui");
+      useFlashStore.getState().show("success", "Status pembayaran diperbarui");
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     }
   };
 
@@ -227,9 +229,9 @@ export default function InvoicesPage() {
       if (!res.ok) throw new Error(json?.error || "Gagal menghapus nota");
       // refresh list
       await fetchData();
-      alert("Nota berhasil dihapus");
+      useFlashStore.getState().show("success", "Nota berhasil dihapus");
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     }
   };
 
@@ -295,9 +297,13 @@ export default function InvoicesPage() {
                     <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString("id-ID")}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{r.payment_method ?? "-"}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <span className={`neo-badge ${r.payment_method ? "success" : "pending"}`}>
-                        {r.payment_method ? "dibayar" : "pending"}
-                      </span>
+                      {(() => {
+                        const pm = r.payment_method;
+                        const isGift = pm === "gift" || pm === "tester";
+                        const cls = isGift ? "gift" : pm ? "success" : "pending";
+                        const label = isGift ? "gift" : pm ? "dibayar" : "pending";
+                        return <span className={`neo-badge ${cls}`}>{label}</span>;
+                      })()}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">{r.items_count}</td>
                     <td className="px-3 py-2 font-bold whitespace-nowrap">Rp {Number(r.grand_total || 0).toLocaleString("id-ID")}</td>
@@ -375,11 +381,18 @@ export default function InvoicesPage() {
               <div><span className="font-mono text-xs">ID:</span> {detailData.invoice.id}</div>
               <div>Tanggal: {new Date(detailData.invoice.created_at).toLocaleString("id-ID")}</div>
               <div>Metode: {detailData.invoice.payment_method ?? "-"}</div>
+              {detailData.invoice.notes ? (
+                <div>Catatan: {detailData.invoice.notes}</div>
+              ) : null}
               <div>
                 Status: {" "}
-                <span className={`neo-badge ${detailData.invoice.payment_method ? "success" : "pending"}`}>
-                  {detailData.invoice.payment_method ? "dibayar" : "pending"}
-                </span>
+                {(() => {
+                  const pm = detailData.invoice.payment_method;
+                  const isGift = pm === "gift" || pm === "tester";
+                  const cls = isGift ? "gift" : pm ? "success" : "pending";
+                  const label = isGift ? "gift" : pm ? "dibayar" : "pending";
+                  return <span className={`neo-badge ${cls}`}>{label}</span>;
+                })()}
               </div>
             </div>
             <div className="overflow-x-auto overflow-y-visible relative">

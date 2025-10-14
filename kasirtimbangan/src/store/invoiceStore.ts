@@ -10,7 +10,7 @@ export type InvoiceItem = {
   fullImageDataUrl?: string;
 };
 
-type PaymentMethod = "cash" | "card" | "qr" | null;
+type PaymentMethod = "cash" | "card" | "qr" | "tester" | "gift" | null;
 
 type InvoiceState = {
   items: InvoiceItem[];

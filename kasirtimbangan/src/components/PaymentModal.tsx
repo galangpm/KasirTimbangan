@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function PaymentModal({
   open,
@@ -9,11 +9,13 @@ export default function PaymentModal({
 }: {
   open: boolean;
   onClose: () => void;
-  onPay: (method: "cash" | "card" | "qr") => void;
+  onPay: (method: "cash" | "card" | "qr" | "tester" | "gift", notes?: string) => void;
   receiptText?: string;
 }) {
   const firstPayRef = useRef<HTMLButtonElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
+  const [selected, setSelected] = useState<"cash" | "card" | "qr" | "tester" | "gift" | null>(null);
+  const [notes, setNotes] = useState<string>("");
 
   // Lock body scroll ketika modal terbuka untuk konsistensi UX
   useEffect(() => {
@@ -38,6 +40,14 @@ export default function PaymentModal({
       document.removeEventListener("keydown", onKey);
     };
   }, [open, onClose]);
+
+  // Reset pilihan saat modal ditutup/dibuka ulang
+  useEffect(() => {
+    if (!open) {
+      setSelected(null);
+      setNotes("");
+    }
+  }, [open]);
 
   if (!open) return null;
 
@@ -70,7 +80,34 @@ export default function PaymentModal({
             className="neo-button secondary small"
             onClick={() => onPay("card")}
           >Kartu</button>
+          <button
+            className={`neo-button secondary small ${selected === "tester" ? "ring-2 ring-blue-500" : ""}`}
+            onClick={() => setSelected("tester")}
+          >Tester</button>
+          <button
+            className={`neo-button secondary small ${selected === "gift" ? "ring-2 ring-blue-500" : ""}`}
+            onClick={() => setSelected("gift")}
+          >Hadiah</button>
         </div>
+        {(selected === "tester" || selected === "gift") && (
+          <div className="mb-4">
+            <label className="text-sm">Catatan (wajib diisi)</label>
+            <input
+              type="text"
+              className="neo-input w-full"
+              placeholder="contoh: tester untuk pelanggan, hadiah promo, dll"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
+            <div className="mt-2 flex justify-end">
+              <button
+                className="neo-button primary"
+                disabled={!notes.trim()}
+                onClick={() => onPay(selected!, notes.trim())}
+              >Konfirmasi Pembayaran</button>
+            </div>
+          </div>
+        )}
         <div className="flex justify-between">
           <button ref={closeRef} className="neo-button ghost" onClick={onClose}>Tutup</button>
         </div>

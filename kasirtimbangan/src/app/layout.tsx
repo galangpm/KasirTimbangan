@@ -4,6 +4,7 @@ import "./globals.css";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
 import Sidebar from "@/components/Sidebar";
 import InvoiceSeed from "@/components/InvoiceSeed";
+import FlashHost from "@/components/FlashHost";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,6 +31,8 @@ export default function RootLayout({
   return (
     <html lang="id">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        {/* Flash messages at the top of the page */}
+        <FlashHost />
         {/* Shell layout: Sidebar + content */}
         <div className="md:flex md:min-h-screen bg-gray-50">
           <Sidebar />

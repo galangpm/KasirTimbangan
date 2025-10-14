@@ -4,6 +4,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import PaymentModal from "@/components/PaymentModal";
 import QRCode from "qrcode";
 import { cacheGet } from "@/utils/invoiceCache";
+import { useFlashStore } from "@/store/flashStore";
 
 // Tambahkan helper untuk konsistensi error handling
 const getErrorMessage = (e: unknown): string => {
@@ -13,7 +14,7 @@ const getErrorMessage = (e: unknown): string => {
 };
 
 // Tipe eksplisit untuk data detail invoice termasuk gambar
-interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; }
+interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; notes?: string | null; }
 interface InvoiceItemRow {
   id: string;
   fruit: string;
@@ -64,7 +65,7 @@ export default function InvoiceDetailPage() {
       if (!res.ok) throw new Error(json?.error || "Gagal memuat detail nota");
       setData({ invoice: json.invoice as InvoiceHeader, items: (json.items as InvoiceItemRow[]) || [] });
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -133,7 +134,17 @@ export default function InvoiceDetailPage() {
               <div><span className="font-mono text-xs">ID:</span> {data.invoice.id}</div>
               <div>Tanggal: <span suppressHydrationWarning>{new Date(data.invoice.created_at).toLocaleString("id-ID")}</span></div>
               <div>Metode: {data.invoice.payment_method ?? "-"}</div>
-              <div>Status: <span className={`neo-badge ${data.invoice.payment_method ? "success" : "pending"}`}>{data.invoice.payment_method ? "dibayar" : "pending"}</span></div>
+              {data.invoice.notes ? (<div>Catatan: {data.invoice.notes}</div>) : null}
+              <div>
+                Status: {" "}
+                {(() => {
+                  const pm = data.invoice.payment_method;
+                  const isGift = pm === "gift" || pm === "tester";
+                  const cls = isGift ? "gift" : pm ? "success" : "pending";
+                  const label = isGift ? "gift" : pm ? "dibayar" : "pending";
+                  return <span className={`neo-badge ${cls}`}>{label}</span>;
+                })()}
+              </div>
             </div>
             <div className="overflow-x-auto overflow-y-visible relative hscroll-touch">
               <table className="min-w-[720px] md:min-w-0 md:w-full text-sm neo-table">
@@ -197,8 +208,21 @@ export default function InvoiceDetailPage() {
         <PaymentModal
           open={openPay}
           onClose={() => setOpenPay(false)}
-          onPay={(m) => {
-            alert(`Metode pembayaran: ${m}`);
+          onPay={async (m, notes) => {
+            try {
+              const res = await fetch(`/api/invoices/${id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ payment_method: m, notes: notes ?? undefined }),
+              });
+              const json = await res.json();
+              if (!res.ok) throw new Error(json?.error || "Gagal memperbarui pembayaran");
+              setData((prev) => prev ? { invoice: { ...prev.invoice, payment_method: m, notes: notes ?? prev.invoice.notes ?? null }, items: prev.items } : prev);
+              setOpenPay(false);
+              useFlashStore.getState().show("success", "Status pembayaran diperbarui");
+            } catch (e: unknown) {
+              useFlashStore.getState().show("error", getErrorMessage(e));
+            }
           }}
           receiptText={receiptText}
         />

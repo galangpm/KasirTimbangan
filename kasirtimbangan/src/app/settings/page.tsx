@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
+import { useFlashStore } from "@/store/flashStore";
 
 export default function SettingsPage() {
   // Hapus penggunaan store lokal, gunakan state lokal yang diambil dari DB
@@ -58,7 +59,7 @@ export default function SettingsPage() {
         setReceiptFooter(String(s.receiptFooter || ""));
       }
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
       setSLoading(false);
     }
@@ -77,10 +78,10 @@ export default function SettingsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error((data?.errors && data.errors.join(", ")) || data?.error || "Gagal menyimpan pengaturan usaha");
-      alert("Pengaturan usaha berhasil disimpan");
+      useFlashStore.getState().show("success", "Pengaturan usaha berhasil disimpan");
       await loadSettings();
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
       setSSaving(false);
     }
@@ -96,7 +97,7 @@ export default function SettingsPage() {
       const list = entries.map(([fruit, price]) => ({ fruit, price: Number(price) || 0 }));
       setPrices(list);
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -121,10 +122,10 @@ export default function SettingsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Gagal menyimpan harga");
-      alert(`Harga berhasil disimpan (upserted: ${data.upserted}, removed: ${data.removed}).`);
+      useFlashStore.getState().show("success", `Harga berhasil disimpan (upserted: ${data.upserted}, removed: ${data.removed}).`);
       await loadPrices();
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -133,8 +134,8 @@ export default function SettingsPage() {
   const addRow = () => {
     const fruit = newFruit.trim();
     const price = Math.max(0, Math.floor(Number(newPrice) || 0));
-    if (!fruit) return alert("Nama buah wajib diisi");
-    if (prices.some((p) => p.fruit === fruit)) return alert("Buah sudah ada");
+    if (!fruit) { useFlashStore.getState().show("warning", "Nama buah wajib diisi"); return; }
+    if (prices.some((p) => p.fruit === fruit)) { useFlashStore.getState().show("warning", "Buah sudah ada"); return; }
     setPrices((list) => [...list, { fruit, price }]);
     setNewFruit("");
     setNewPrice("");

@@ -6,6 +6,7 @@ import CameraCapture from "@/components/CameraCapture";
 import PaymentModal from "@/components/PaymentModal";
 import { usePriceStore } from "@/store/priceStore";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
+import { useFlashStore } from "@/store/flashStore";
 import { useRouter } from "next/navigation";
 import { connectAndPrint } from "@/utils/bluetoothPrint";
 import { connectAndPrintTextAndQR } from "@/utils/bluetoothPrint";
@@ -45,7 +46,7 @@ const getErrorMessage = (e: unknown): string => {
   try { return JSON.stringify(e); } catch { return String(e); }
 };
 // Tipe untuk data nota (dari endpoint detail invoices)
-interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; }
+interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; notes?: string | null }
 interface InvoiceItemRow { id: string; fruit: string; weight_kg: number; price_per_kg: number; total_price: number; }
 function buildReceipt58(data: { invoice: InvoiceHeader; items: InvoiceItemRow[] } | null, settings: { name: string; address: string; phone: string; receiptFooter: string } | null) {
   if (!data) return "Nota kosong";
@@ -64,6 +65,9 @@ function buildReceipt58(data: { invoice: InvoiceHeader; items: InvoiceItemRow[] 
   lines.push(padRight(`ID: ${invId}`, RECEIPT_WIDTH));
   lines.push(padRight(`Tanggal: ${tanggal}`, RECEIPT_WIDTH));
   lines.push(padRight(`Metode: ${metode}`, RECEIPT_WIDTH));
+  if (data.invoice.notes && (data.invoice.payment_method === "tester" || data.invoice.payment_method === "gift")) {
+    lines.push(padRight(`Catatan: ${data.invoice.notes}`, RECEIPT_WIDTH));
+  }
   lines.push(sep());
   // Items
   for (const it of (data.items || [])) {
@@ -263,13 +267,13 @@ export default function Home() {
   };
 
   const handleAddItem = () => {
-    if (!fruit) return alert("Pilih jenis buah");
+    if (!fruit) { useFlashStore.getState().show("warning", "Pilih jenis buah"); return; }
     let w = weightKg ?? 0;
     if (!w || w <= 0) {
       const input = prompt("Masukkan berat (kg):", "0.500");
       if (!input) return;
       const val = parseFloat(input);
-      if (isNaN(val) || val <= 0) return alert("Berat tidak valid");
+      if (isNaN(val) || val <= 0) { useFlashStore.getState().show("warning", "Berat tidak valid"); return; }
       w = val;
       setWeightKg(val);
       setWeightText(input);
@@ -350,7 +354,7 @@ export default function Home() {
       setShowPreview(true);
       // Jangan langsung buka pembayaran agar tidak menghambat alur
     } catch (e: unknown) {
-      alert(getErrorMessage(e));
+      useFlashStore.getState().show("error", getErrorMessage(e));
     }
   };
 
@@ -518,7 +522,7 @@ export default function Home() {
         <PaymentModal
           open={showPayment}
           onClose={() => setShowPayment(false)}
-          onPay={async (m) => {
+          onPay={async (m, notes) => {
             try {
               setPaymentMethod(m);
               const id = lastInvoiceId;
@@ -527,17 +531,17 @@ export default function Home() {
               const patchRes = await fetch(`/api/invoices/${id}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ payment_method: m }),
+                body: JSON.stringify({ payment_method: m, notes: notes ?? undefined }),
               });
               const patchJson = await patchRes.json();
               if (!patchRes.ok) throw new Error(patchJson?.error || "Gagal mengubah metode pembayaran");
 
               // Update cache lokal status pembayaran
-              try { cacheUpdatePayment(id, m); } catch {}
+              try { cacheUpdatePayment(id, m, notes ?? null); } catch {}
 
               // Bangun teks nota dari data lokal dan cache settings (tanpa fetch tambahan)
               const localData2 = {
-                invoice: { id, created_at: new Date().toISOString(), payment_method: m },
+                invoice: { id, created_at: new Date().toISOString(), payment_method: m, notes: notes ?? null },
                 items: items.map((it: InvoiceItem) => ({
                   id: "",
                   fruit: it.fruit,
@@ -546,14 +550,22 @@ export default function Home() {
                   total_price: it.totalPrice,
                 })),
               };
-              const text2 = buildReceipt58(localData2, settingsCache);
-              // Cetak teks nota lalu QR UUID agar jelas dan mudah dipindai
-              await connectAndPrintTextAndQR(text2, id);
-              alert("Cetak dikirim ke printer");
-              setShowPayment(false);
-              newInvoice();
+
+              // Khusus metode tester/hadiah: jangan cetak sama sekali
+              if (m === "tester" || m === "gift") {
+                setShowPayment(false);
+                useFlashStore.getState().show("info", "Status pembayaran diperbarui tanpa cetak");
+                newInvoice();
+              } else {
+                const text2 = buildReceipt58(localData2, settingsCache);
+                // Cetak teks nota lalu QR UUID agar jelas dan mudah dipindai
+                await connectAndPrintTextAndQR(text2, id);
+                useFlashStore.getState().show("success", "Cetak dikirim ke printer");
+                setShowPayment(false);
+                newInvoice();
+              }
             } catch (e: unknown) {
-              alert(getErrorMessage(e));
+              useFlashStore.getState().show("error", getErrorMessage(e));
             }
           }}
           receiptText={previewText}
@@ -562,13 +574,13 @@ export default function Home() {
 
       {/* Overlay Kamera: menjaga halaman kasir tetap terlihat di belakang */}
       {showCamera && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={() => setShowCamera(false)}>
-          <div className="neo-card w-full max-w-2xl p-0" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-3 border-b">
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 overflow-y-auto" onClick={() => setShowCamera(false)}>
+          <div className="neo-card w-full max-w-2xl p-0 max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-3 border-b shrink-0">
               <h3 className="text-lg font-semibold">Ambil Foto Timbangan</h3>
               <button ref={cameraCloseRef} className="neo-button ghost small" onClick={() => setShowCamera(false)}>Tutup</button>
             </div>
-            <div className="p-3">
+            <div className="p-3 overflow-y-auto">
               <CameraCapture onCaptured={handleCapture} onClose={() => setShowCamera(false)} />
             </div>
           </div>
@@ -577,11 +589,11 @@ export default function Home() {
 
       {/* Modal Preview Nota */}
       {showPreview && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4">
-          <div className="neo-card w-full max-w-lg p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="neo-card w-full max-w-lg p-4 max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-3">Preview Nota</h3>
             <pre className="whitespace-pre-wrap text-sm bg-slate-50 p-3 rounded border max-h-[50vh] overflow-auto">{previewText}</pre>
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 flex gap-2 shrink-0">
               <button className="flex-1 neo-button ghost" onClick={() => setShowPreview(false)}>Tutup</button>
               <button className="flex-1 neo-button secondary" onClick={() => { setShowPreview(false); setShowPayment(true); }}>Lanjut ke Pembayaran</button>
             </div>

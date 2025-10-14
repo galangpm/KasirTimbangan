@@ -2,7 +2,7 @@
 // Menggunakan localStorage dan menyimpan timestamp per entry
 // Struktur key: invoice:<id>
 
-export interface InvoiceHeader { id: string; created_at: string; payment_method: string | null }
+export interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; notes?: string | null }
 export interface InvoiceItemRow { id: string; fruit: string; weight_kg: number; price_per_kg: number; total_price: number; image_data_url?: string | null; full_image_data_url?: string | null }
 export interface InvoiceDetail { invoice: InvoiceHeader; items: InvoiceItemRow[] }
 
@@ -35,13 +35,14 @@ export function cacheGet(id: string): InvoiceDetail | null {
   }
 }
 
-export function cacheUpdatePayment(id: string, payment_method: string | null): void {
+export function cacheUpdatePayment(id: string, payment_method: string | null, notes?: string | null): void {
   try {
     const raw = localStorage.getItem(makeKey(id));
     if (!raw) return;
     const entry = JSON.parse(raw) as CacheEntry<InvoiceDetail>;
     if (!entry?.data?.invoice) return;
     entry.data.invoice.payment_method = payment_method;
+    if (typeof notes !== "undefined") entry.data.invoice.notes = notes;
     entry.ts = now();
     localStorage.setItem(makeKey(id), JSON.stringify(entry));
   } catch {}

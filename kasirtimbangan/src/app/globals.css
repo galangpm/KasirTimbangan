@@ -96,6 +96,7 @@ body {
 }
 .neo-badge.pending { background: var(--neo-primary); color: #000; }
 .neo-badge.success { background: var(--neo-success); color: #000; }
+.neo-badge.gift { background: #e5e7eb; color: #000; }
 
 /* Enable smooth horizontal scrolling on mobile (iOS/Android) */
 .hscroll-touch {

@@ -46,8 +46,19 @@ export async function POST() {
     await conn.query(`CREATE TABLE IF NOT EXISTS invoices (
       id CHAR(36) PRIMARY KEY,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      payment_method VARCHAR(16) NULL
+      payment_method VARCHAR(16) NULL,
+      notes TEXT NULL
     ) ENGINE=InnoDB`);
+
+    // Pastikan kolom notes ada (untuk skema lama yang belum punya)
+    try {
+      const [colsInv] = await conn.query<ColumnRow[]>(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'notes'`
+      );
+      if (!Array.isArray(colsInv) || colsInv.length === 0) {
+        await conn.query(`ALTER TABLE invoices ADD COLUMN notes TEXT NULL`);
+      }
+    } catch {}
 
     await conn.query(`CREATE TABLE IF NOT EXISTS invoice_items (
       id INT AUTO_INCREMENT PRIMARY KEY,
