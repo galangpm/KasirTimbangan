@@ -1,20 +1,27 @@
 "use client";
 import { useEffect, useRef } from "react";
+import { usePathname } from "next/navigation";
 import { getLastFingerprint, setLastFingerprint, purgeExpired } from "@/utils/invoiceCache";
 
 // Seeder ringan: jalan tiap 1 menit, hanya fetch jika fingerprint berubah
 export default function InvoiceSeed() {
+  const pathname = usePathname();
+  const isLoginPage = (pathname || "").startsWith("/login");
+
   const timerRef = useRef<number | null>(null);
   const runningRef = useRef<boolean>(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    if (isLoginPage) return; // jangan jalan di halaman login
     const checkAndSeed = async () => {
       if (runningRef.current) return; // hindari overlapped
       runningRef.current = true;
       try {
         // Bersihkan cache yang kadaluarsa secara opportunistic
         purgeExpired();
-        const res = await fetch("/api/invoices?meta=last24", { cache: "no-store" });
+        abortRef.current = new AbortController();
+        const res = await fetch("/api/invoices?meta=last24", { cache: "no-store", signal: abortRef.current.signal });
         const json = await res.json();
         if (res.ok && json?.fingerprint) {
           const fpServer = String(json.fingerprint);
@@ -23,7 +30,7 @@ export default function InvoiceSeed() {
             // Fingerprint berubah: lakukan reseed data last24 untuk mempercepat akses detail
             // Ambil halaman-paging awal last24, hanya metadata penting untuk cache list jika diperlukan
             try {
-              const listRes = await fetch("/api/invoices?range=last24&page=1&pageSize=50", { cache: "no-store" });
+              const listRes = await fetch("/api/invoices?range=last24&page=1&pageSize=50", { cache: "no-store", signal: abortRef.current.signal });
               const listJson = await listRes.json();
               if (listRes.ok && Array.isArray(listJson?.data)) {
                 // Tidak menyimpan item per-entry di sini untuk hemat bandwidth; detail akan diambil saat dibuka
@@ -40,6 +47,7 @@ export default function InvoiceSeed() {
       } catch {}
       finally {
         runningRef.current = false;
+        abortRef.current = null;
       }
     };
 
@@ -66,8 +74,11 @@ export default function InvoiceSeed() {
     timerRef.current = window.setInterval(checkAndSeed, 60_000);
     return () => {
       if (timerRef.current) window.clearInterval(timerRef.current);
+      if (abortRef.current) {
+        try { abortRef.current.abort(); } catch {}
+      }
     };
-  }, []);
+  }, [isLoginPage]);
 
   return null;
 }

@@ -10,6 +10,7 @@ import { useFlashStore } from "@/store/flashStore";
 import { useRouter } from "next/navigation";
 import { connectAndPrint } from "@/utils/bluetoothPrint";
 import { connectAndPrintTextAndQR } from "@/utils/bluetoothPrint";
+import { buildReceipt58 } from "@/utils/receipt";
 import QRCode from "qrcode";
 import { cacheSet, cacheUpdatePayment } from "@/utils/invoiceCache";
 
@@ -21,92 +22,33 @@ const formatWeightScale = (kg: number) => {
   return `${intPart}.${decPart}`;
 };
 
-// Formatter nota 58mm (hitam/putih, teks saja)
-const RECEIPT_WIDTH = 32;
-function padRight(str: string, len: number) {
-  if (str.length >= len) return str.slice(0, len);
-  return str + " ".repeat(len - str.length);
-}
-function padLeft(str: string, len: number) {
-  if (str.length >= len) return str.slice(0, len);
-  return " ".repeat(len - str.length) + str;
-}
-function center(str: string, width = RECEIPT_WIDTH) {
-  const s = str.slice(0, width);
-  const space = Math.max(0, Math.floor((width - s.length) / 2));
-  return " ".repeat(space) + s;
-}
-function sep(width = RECEIPT_WIDTH) { return "-".repeat(width); }
-function formatCurrencyIDR(n: number) { return `Rp ${Number(n || 0).toLocaleString("id-ID")}`; }
-function formatWeight3(n: number) { return Number(n || 0).toLocaleString("id-ID", { minimumFractionDigits: 3 }); }
 // Helper aman untuk pesan error
 const getErrorMessage = (e: unknown): string => {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   try { return JSON.stringify(e); } catch { return String(e); }
 };
+
+// Validasi & normalisasi nomor WhatsApp Indonesia
+const normalizeWhatsapp = (inp: string): string => {
+  const s = inp.replace(/\s|-/g, "").trim();
+  if (!s) return "";
+  if (s.startsWith("+")) return s;
+  if (s.startsWith("0")) return "+62" + s.slice(1);
+  if (s.startsWith("62")) return "+" + s;
+  return "+62" + s;
+};
+const isValidWhatsapp = (wa: string): boolean => {
+  const digits = wa.replace(/[^0-9]/g, "");
+  return digits.length >= 10 && digits.length <= 15;
+};
 // Tipe untuk data nota (dari endpoint detail invoices)
 interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; notes?: string | null }
 interface InvoiceItemRow { id: string; fruit: string; weight_kg: number; price_per_kg: number; total_price: number; }
-function buildReceipt58(data: { invoice: InvoiceHeader; items: InvoiceItemRow[] } | null, settings: { name: string; address: string; phone: string; receiptFooter: string } | null) {
-  if (!data) return "Nota kosong";
-  const name = settings?.name || "Kasir Timbangan";
-  const address = settings?.address || "";
-  const phone = settings?.phone || "";
-  const invId = String(data.invoice.id);
-  const tanggal = new Date(data.invoice.created_at).toLocaleString("id-ID");
-  const metode = data.invoice.payment_method ?? "-";
-
-  const lines: string[] = [];
-  lines.push(center(name));
-  if (address) lines.push(center(address));
-  if (phone) lines.push(center(`Telp: ${phone}`));
-  lines.push(sep());
-  lines.push(padRight(`ID: ${invId}`, RECEIPT_WIDTH));
-  lines.push(padRight(`Tanggal: ${tanggal}`, RECEIPT_WIDTH));
-  lines.push(padRight(`Metode: ${metode}`, RECEIPT_WIDTH));
-  if (data.invoice.notes && (data.invoice.payment_method === "tester" || data.invoice.payment_method === "gift")) {
-    lines.push(padRight(`Catatan: ${data.invoice.notes}`, RECEIPT_WIDTH));
-  }
-  lines.push(sep());
-  // Items
-  for (const it of (data.items || [])) {
-    const fruit = String(it.fruit);
-    const totalStr = formatCurrencyIDR(Number(it.total_price));
-    const left = fruit.length > 18 ? fruit.slice(0, 18) : fruit;
-    const line1 = (() => {
-      const l = left;
-      const r = totalStr;
-      const spaces = Math.max(0, RECEIPT_WIDTH - l.length - r.length);
-      return l + " ".repeat(spaces) + r;
-    })();
-    const weightStr = `${formatWeight3(Number(it.weight_kg))} kg`;
-    const priceStr = `${formatCurrencyIDR(Number(it.price_per_kg))}/kg`;
-    const line2 = padRight(`  ${weightStr} x ${priceStr}`, RECEIPT_WIDTH);
-    lines.push(line1);
-    lines.push(line2);
-  }
-  lines.push(sep());
-  const totalVal = (data.items || []).reduce((acc: number, it: InvoiceItemRow) => acc + Number(it.total_price || 0), 0);
-  const totalLine = (() => {
-    const label = "TOTAL";
-    const value = formatCurrencyIDR(totalVal);
-    const spaces = Math.max(0, RECEIPT_WIDTH - label.length - value.length);
-    return label + " ".repeat(spaces) + value;
-  })();
-  lines.push(totalLine);
-  lines.push(sep());
-  const footer = settings?.receiptFooter || "Terima kasih!";
-  const footerLines = footer.split(/\r?\n/);
-  for (const fl of footerLines) lines.push(center(fl));
-  lines.push("");
-  // Tambahkan qrSection setelah footer agar pelanggan mudah memindai UUID nota
-
-  lines.push("");
-  return lines.join("\n");
-}
 
 export default function Home() {
+  const [authChecked, setAuthChecked] = useState(false);
+  const [cashierName, setCashierName] = useState<string>("");
   const {
     items,
     newInvoice,
@@ -117,6 +59,7 @@ export default function Home() {
   } = useInvoiceStore();
 
   const { prices } = usePriceStore();
+  const router = useRouter();
 
   // Pastikan dropdown buah dan harga selalu berdasarkan DB
   useEffect(() => {
@@ -137,7 +80,32 @@ export default function Home() {
     };
     loadFromDB();
   }, []);
-  
+
+  // Proteksi akses: hanya kasir/superadmin
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        const data = await res.json();
+        if (!data?.user) {
+          router.replace("/login");
+          return;
+        }
+        const role = String(data.user.role || "");
+        if (role !== "kasir" && role !== "superadmin") {
+          useFlashStore.getState().show("warning", "Akses ditolak: hanya untuk kasir/superadmin");
+          router.replace("/login");
+          return;
+        }
+        try { setCashierName(String(data.user.username || "")); } catch {}
+        setAuthChecked(true);
+      } catch {
+        router.replace("/login");
+      }
+    };
+    check();
+  }, [router]);
+
   // Ketika harga di store berubah, pastikan buah yang dipilih valid
   useEffect(() => {
     const keys = Object.keys(prices);
@@ -157,6 +125,9 @@ export default function Home() {
   const [previewText, setPreviewText] = useState("");
   const [previewQrUrl, setPreviewQrUrl] = useState<string | null>(null);
   const [lastInvoiceId, setLastInvoiceId] = useState<string>("");
+  // Data customer
+  const [customerName, setCustomerName] = useState<string>("");
+  const [customerWhatsapp, setCustomerWhatsapp] = useState<string>("");
   // Cache settings agar tidak perlu fetch saat submit/cetak
   const [settingsCache, setSettingsCache] = useState<{ name: string; address: string; phone: string; receiptFooter: string } | null>(null);
   useEffect(() => {
@@ -192,7 +163,6 @@ export default function Home() {
   const [newPrice, setNewPrice] = useState<string>("");
   const [showMainMenu, setShowMainMenu] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const router = useRouter();
   const imageCloseRef = useRef<HTMLButtonElement | null>(null);
   const cameraCloseRef = useRef<HTMLButtonElement | null>(null);
 
@@ -223,8 +193,8 @@ export default function Home() {
       document.removeEventListener("keydown", onKey);
     };
   }, [showCamera]);
-
-
+  
+  
   // OCR baru: panggil endpoint GPT untuk OCR
   const runOcr = async (imageDataUrl: string): Promise<void> => {
     try {
@@ -248,6 +218,57 @@ export default function Home() {
     }
   };
 
+  // Bangun data URL khusus untuk OCR: grayscale + kontras, resolusi dibatasi
+  const buildOcrDataUrl = (imgData: ImageData, maxW = 512, maxH = 512, quality = 0.65): string => {
+    try {
+      // Clone agar tidak memodifikasi imageData asli
+      const copy = new ImageData(new Uint8ClampedArray(imgData.data), imgData.width, imgData.height);
+      const data = copy.data;
+      const contrast = 1.15; // tingkatkan kontras supaya digit 7-seg lebih jelas
+      const brightness = 0;  // tidak ubah brightness
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        // luminance grayscale
+        let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        // adjust contrast
+        gray = (gray - 128) * contrast + 128 + brightness;
+        if (gray < 0) gray = 0; else if (gray > 255) gray = 255;
+        data[i] = data[i + 1] = data[i + 2] = gray;
+        // alpha tetap
+      }
+      const tmp = document.createElement("canvas");
+      tmp.width = copy.width;
+      tmp.height = copy.height;
+      const tctx = tmp.getContext("2d");
+      if (!tctx) return "";
+      tctx.putImageData(copy, 0, 0);
+      const w = tmp.width;
+      const h = tmp.height;
+      const scale = Math.min(1, maxW / w, maxH / h);
+      let out = tmp;
+      if (scale < 1) {
+        out = document.createElement("canvas");
+        out.width = Math.floor(w * scale);
+        out.height = Math.floor(h * scale);
+        const octx = out.getContext("2d");
+        if (!octx) return tmp.toDataURL("image/jpeg", quality);
+        octx.imageSmoothingEnabled = true;
+        octx.imageSmoothingQuality = "high";
+        octx.drawImage(tmp, 0, 0, w, h, 0, 0, out.width, out.height);
+      }
+      // Prefer WEBP untuk ukuran lebih kecil, fallback ke JPEG jika tidak didukung
+      try {
+        const webp = out.toDataURL("image/webp", quality);
+        if (webp.startsWith("data:image/webp")) return webp;
+      } catch {}
+      return out.toDataURL("image/jpeg", quality);
+    } catch {
+      return "";
+    }
+  };
+
   useEffect(() => {
     const onFull = (e: Event) => {
       const ce = e as CustomEvent<{ fullDataUrl: string }>;
@@ -260,9 +281,11 @@ export default function Home() {
       window.removeEventListener("camera-captured-full", onFull as EventListener);
     };
   }, []);
-  const handleCapture = async (_imageData: ImageData, dataUrl: string) => {
+  const handleCapture = async (imageData: ImageData, dataUrl: string) => {
     setCapturedDataUrl(dataUrl);
-    await runOcr(dataUrl);
+    // Gunakan versi crop teroptimasi khusus untuk OCR
+    const ocrDataUrl = buildOcrDataUrl(imageData);
+    await runOcr(ocrDataUrl || dataUrl);
     setShowCamera(false);
   };
 
@@ -297,8 +320,24 @@ export default function Home() {
   };
 
   const handleSubmit = async () => {
+    // Tampilkan peringatan jika belum ada item
+    if (!items || items.length === 0) {
+      useFlashStore.getState().show("warning", "Silakan tambahkan item terlebih dahulu");
+      return;
+    }
+    const name = String(customerName || "").trim();
+    const waNorm = normalizeWhatsapp(String(customerWhatsapp || ""));
+    const hasWa = waNorm.length > 0;
+    if (!name) {
+      useFlashStore.getState().show("warning", "Nama customer wajib diisi");
+      return;
+    }
+    if (hasWa && !isValidWhatsapp(waNorm)) {
+      useFlashStore.getState().show("warning", "Nomor WhatsApp tidak valid. Gunakan format +62xxx atau 08xxx");
+      return;
+    }
     try {
-      // Kurangi ukuran payload: kirim tanpa fullImageDataUrl dan batasi imageDataUrl bila terlalu besar
+      // Kirim foto full (tanpa crop) ke server; batasi ukuran agar aman
       const sanitizedItems = items.map((it: InvoiceItem) => ({
         fruit: it.fruit,
         weightKg: it.weightKg,
@@ -308,12 +347,16 @@ export default function Home() {
           typeof it.imageDataUrl === "string" && it.imageDataUrl.length <= 500_000
             ? it.imageDataUrl
             : undefined,
+        fullImageDataUrl:
+          typeof it.fullImageDataUrl === "string" && it.fullImageDataUrl.length <= 2_000_000
+            ? it.fullImageDataUrl
+            : undefined,
       }));
 
       const res = await fetch("/api/invoices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: sanitizedItems }),
+        body: JSON.stringify({ items: sanitizedItems, customer: { name, whatsapp: hasWa ? waNorm : null } }),
         cache: "no-store",
       });
       const json = await res.json();
@@ -348,7 +391,7 @@ export default function Home() {
           total_price: it.totalPrice,
         })),
       };
-      const text = buildReceipt58(localData, settingsCache);
+      const text = buildReceipt58(localData, settingsCache, cashierName, name);
       setPreviewText(text);
       // Tampilkan Preview Nota dulu, termasuk QR UUID, sebelum menuju pembayaran
       setShowPreview(true);
@@ -357,6 +400,11 @@ export default function Home() {
       useFlashStore.getState().show("error", getErrorMessage(e));
     }
   };
+
+  // Render skeleton setelah semua hooks dideklarasikan
+  if (!authChecked) {
+    return <div className="neo-card p-4">Memeriksa akses...</div>;
+  }
 
   return (
     <div className="p-4 space-y-4">
@@ -368,10 +416,35 @@ export default function Home() {
           <button
             className="neo-button primary"
             onClick={handleSubmit}
-            disabled={items.length === 0}
           >
             Simpan & Bayar
           </button>
+        </div>
+
+        {/* Data Customer */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          <div>
+            <label className="text-sm">Nama Customer</label>
+            <input
+              type="text"
+              className="neo-input w-full"
+              placeholder="Nama lengkap"
+              value={customerName}
+              onChange={(e) => setCustomerName(e.target.value)}
+            />
+            <p className="text-xs text-slate-500 mt-1">Wajib diisi.</p>
+          </div>
+          <div>
+            <label className="text-sm">Nomor WhatsApp Customer (opsional)</label>
+            <input
+              type="text"
+              className="neo-input w-full font-mono"
+              placeholder="Contoh: +6281234567890 atau 081234567890"
+              value={customerWhatsapp}
+              onChange={(e) => setCustomerWhatsapp(e.target.value)}
+            />
+            <p className="text-xs text-slate-500 mt-1">Opsional. Format: +62xxx atau 08xxx.</p>
+          </div>
         </div>
 
         {/* Input Item: pilih buah, lihat berat OCR, buka kamera, tambah item */}
@@ -557,7 +630,7 @@ export default function Home() {
                 useFlashStore.getState().show("info", "Status pembayaran diperbarui tanpa cetak");
                 newInvoice();
               } else {
-                const text2 = buildReceipt58(localData2, settingsCache);
+                const text2 = buildReceipt58(localData2, settingsCache, cashierName, String(customerName || "").trim());
                 // Cetak teks nota lalu QR UUID agar jelas dan mudah dipindai
                 await connectAndPrintTextAndQR(text2, id);
                 useFlashStore.getState().show("success", "Cetak dikirim ke printer");

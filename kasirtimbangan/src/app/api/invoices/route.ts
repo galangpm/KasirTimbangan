@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { getPool } from "@/utils/db";
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, RowDataPacket, ResultSetHeader } from "mysql2/promise";
+import { SESSION_COOKIE, verifySessionToken } from "@/utils/auth";
+import { promises as fs } from "fs";
+import path from "path";
+import { enqueueUploadJob, ensureUploadWorkerStarted } from "@/utils/uploadWorker";
 
 type InvoiceItemInput = {
   fruit: string;
@@ -9,6 +14,11 @@ type InvoiceItemInput = {
   totalPrice: number;
   imageDataUrl?: string | null;
   fullImageDataUrl?: string | null;
+};
+
+type CustomerInput = {
+  name: string;
+  whatsapp: string;
 };
 
 interface ColumnRow extends RowDataPacket {
@@ -22,6 +32,28 @@ const getErrorMessage = (e: unknown): string => {
   if (typeof e === "string") return e;
   try { return JSON.stringify(e); } catch { return String(e); }
 };
+
+function isDataUrl(s: unknown): s is string {
+  return typeof s === "string" && s.startsWith("data:image/");
+}
+
+async function saveImageDataUrlToPublic(dataUrl: string, invoiceId: string, kind: "thumb" | "full", index: number): Promise<string> {
+  const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(dataUrl);
+  if (!m) {
+    // Bukan data URL, kembalikan apa adanya (bisa jadi sudah URL)
+    return dataUrl;
+  }
+  const mime = m[1].toLowerCase();
+  const b64 = m[2];
+  const ext = mime === "image/png" ? "png" : "jpg";
+  const dir = path.join(process.cwd(), "public", "images");
+  await fs.mkdir(dir, { recursive: true });
+  const safeInv = String(invoiceId).replace(/[^a-zA-Z0-9]/g, "");
+  const filename = `inv_${safeInv}_${index}_${kind}.${ext}`;
+  const filePath = path.join(dir, filename);
+  await fs.writeFile(filePath, Buffer.from(b64, "base64"));
+  return `/images/${filename}`;
+}
 
 async function migrateInvoicesSchema(conn: PoolConnection) {
   // Pastikan tabel invoices ada dulu
@@ -107,11 +139,33 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
     try { await conn.query(`ALTER TABLE invoice_items ADD CONSTRAINT fk_invoice FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE`); } catch {}
   }
 
+  // Tambahkan kolom user_id pada invoices bila belum ada, serta index dan FK ke users
+  try { await conn.query(`ALTER TABLE invoices ADD COLUMN user_id CHAR(36) NULL`); } catch {}
+  try { await conn.query(`ALTER TABLE invoices ADD INDEX idx_invoices_user_id (user_id)`); } catch {}
+  // Tambah FK ke users, abaikan bila sudah ada atau users belum ada
+  try { await conn.query(`ALTER TABLE invoices ADD CONSTRAINT fk_invoices_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT`); } catch {}
+
+  // Buat tabel logs untuk audit trail bila belum ada
+  await conn.query(`CREATE TABLE IF NOT EXISTS logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    user_id CHAR(36) NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    invoice_id CHAR(36) NULL,
+    details TEXT NULL,
+    INDEX idx_logs_user_id (user_id),
+    INDEX idx_logs_invoice_id (invoice_id),
+    CONSTRAINT fk_logs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_logs_invoice FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB`);
+
   // Pastikan skema akhir sesuai (id CHAR(36) pada invoices, dan invoice_items.invoice_id CHAR(36))
   await conn.query(`CREATE TABLE IF NOT EXISTS invoices (
     id CHAR(36) PRIMARY KEY,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    payment_method VARCHAR(16) NULL
+    payment_method VARCHAR(16) NULL,
+    user_id CHAR(36) NULL,
+    customer_uuid CHAR(36) NULL
   ) ENGINE=InnoDB`);
   await conn.query(`CREATE TABLE IF NOT EXISTS invoice_items (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -125,14 +179,60 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
     INDEX idx_invoice_id (invoice_id),
     CONSTRAINT fk_invoice FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
   ) ENGINE=InnoDB`);
+
+  // Tabel customers dan relasi customer_uuid di invoices
+  await conn.query(`CREATE TABLE IF NOT EXISTS customers (
+    uuid CHAR(36) PRIMARY KEY,
+    name VARCHAR(128) NOT NULL,
+    whatsapp VARCHAR(64) NULL,
+    address VARCHAR(255) NULL,
+    UNIQUE KEY unique_whatsapp (whatsapp)
+  ) ENGINE=InnoDB`);
+  try { await conn.query(`ALTER TABLE customers ADD COLUMN address VARCHAR(255) NULL`); } catch {}
+  // Migrasi kolom whatsapp agar nullable untuk skema lama
+  try { await conn.query(`ALTER TABLE customers MODIFY COLUMN whatsapp VARCHAR(64) NULL`); } catch {}
+  try { await conn.query(`ALTER TABLE invoices ADD COLUMN customer_uuid CHAR(36) NULL`); } catch {}
+  try { await conn.query(`ALTER TABLE invoices ADD INDEX idx_invoices_customer_uuid (customer_uuid)`); } catch {}
+  try { await conn.query(`ALTER TABLE invoices ADD CONSTRAINT fk_invoices_customer FOREIGN KEY (customer_uuid) REFERENCES customers(uuid) ON DELETE SET NULL`); } catch {}
 }
 
 export async function POST(req: NextRequest) {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value || "";
+  const payload = token ? verifySessionToken(token) : null;
+  if (!payload) {
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+  if (payload.role !== "kasir" && payload.role !== "superadmin") {
+    return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+  }
   try {
     const body = await req.json();
-    const { items, paymentMethod } = body || {} as { items: InvoiceItemInput[]; paymentMethod?: string };
+    const { items, paymentMethod, customer } = body || {} as { items: InvoiceItemInput[]; paymentMethod?: string; customer?: CustomerInput };
     if (!Array.isArray(items) || items.length === 0) {
       return NextResponse.json({ error: "items wajib diisi" }, { status: 400 });
+    }
+    // Validasi customer
+    const rawName = String(customer?.name || "").trim();
+    const rawWa = String(customer?.whatsapp || "").trim();
+    function normalizeWhatsapp(inp: string): string {
+      const s = inp.replace(/\s|-/g, "").trim();
+      if (!s) return "";
+      if (s.startsWith("+")) return s;
+      if (s.startsWith("0")) return "+62" + s.slice(1);
+      if (s.startsWith("62")) return "+" + s;
+      // default: jika tidak ada awalan, anggap lokal Indonesia tanpa 0
+      return "+62" + s;
+    }
+    const normalizedWa = normalizeWhatsapp(rawWa);
+    const waDigits = normalizedWa.replace(/[^0-9]/g, "");
+    if (!rawName) {
+      return NextResponse.json({ error: "Nama customer wajib diisi" }, { status: 400 });
+    }
+    if (normalizedWa) {
+      if (waDigits.length < 10 || waDigits.length > 15) {
+        return NextResponse.json({ error: "Nomor WhatsApp tidak valid" }, { status: 400 });
+      }
     }
 
     const pool = getPool();
@@ -142,17 +242,67 @@ export async function POST(req: NextRequest) {
 
       await migrateInvoicesSchema(conn);
 
+      // Validasi bahwa user yang melakukan request ada di tabel users
+      const [[userRow]] = await conn.query<RowDataPacket[]>(
+        "SELECT id FROM users WHERE id = ? LIMIT 1",
+        [String(payload.id)]
+      );
+      if (!userRow) {
+        await conn.rollback();
+        conn.release();
+        return NextResponse.json({ ok: false, error: "User tidak ditemukan" }, { status: 400 });
+      }
+
+      // Pastikan/ambil UUID customer
+      let customerUuid: string = "";
+      if (normalizedWa) {
+        // Jika WA tersedia, gunakan sebagai kunci unik
+        const [[custRow]] = await conn.query<RowDataPacket[]>(
+          `SELECT uuid FROM customers WHERE whatsapp = ? LIMIT 1`,
+          [normalizedWa]
+        );
+        customerUuid = String(custRow?.uuid || "");
+        if (!customerUuid) {
+          const [[newCust]] = await conn.query<RowDataPacket[]>(`SELECT UUID() AS uuid`);
+          customerUuid = String(newCust.uuid);
+          await conn.query(
+            `INSERT INTO customers (uuid, name, whatsapp) VALUES (?, ?, ?)`,
+            [customerUuid, rawName, normalizedWa]
+          );
+        } else {
+          // Update nama jika berubah (opsional)
+          try { await conn.query(`UPDATE customers SET name = ? WHERE uuid = ?`, [rawName, customerUuid]); } catch {}
+        }
+      } else {
+        // Jika WA kosong, buat customer baru dengan whatsapp NULL
+        const [[newCust]] = await conn.query<RowDataPacket[]>(`SELECT UUID() AS uuid`);
+        customerUuid = String(newCust.uuid);
+        await conn.query(
+          `INSERT INTO customers (uuid, name, whatsapp) VALUES (?, ?, NULL)`,
+          [customerUuid, rawName]
+        );
+      }
+
       // Generate UUID untuk invoice, lalu insert
       const [[uuidRow]] = await conn.query<RowDataPacket[]>("SELECT UUID() AS uuid");
       const invoiceId: string = String(uuidRow.uuid);
 
       await conn.query(
-        "INSERT INTO invoices (id, payment_method) VALUES (?, ?)",
-        [invoiceId, paymentMethod || null]
+        "INSERT INTO invoices (id, payment_method, user_id, customer_uuid) VALUES (?, ?, ?, ?)",
+        [invoiceId, paymentMethod || null, String(payload.id), customerUuid]
       );
 
-      for (const it of items) {
-        await conn.query(
+      ensureUploadWorkerStarted();
+      const savedImages: Array<{ thumbUrl: string | null; fullUrl: string | null }> = [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        // Simpan nilai yang dikirim; upload file dilakukan di background worker
+        let thumbFinal = it.imageDataUrl ? String(it.imageDataUrl) : null;
+        let fullFinal = it.fullImageDataUrl ? String(it.fullImageDataUrl) : null;
+        if (!thumbFinal && fullFinal) thumbFinal = fullFinal;
+        if (!fullFinal && thumbFinal) fullFinal = thumbFinal;
+        savedImages.push({ thumbUrl: thumbFinal, fullUrl: fullFinal });
+        const [res] = await conn.query<ResultSetHeader>(
           `INSERT INTO invoice_items (
             invoice_id, fruit, weight_kg, price_per_kg, total_price, image_data_url, full_image_data_url
           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -162,15 +312,35 @@ export async function POST(req: NextRequest) {
             it.weightKg,
             it.pricePerKg,
             it.totalPrice,
-            it.imageDataUrl ?? null,
-            it.fullImageDataUrl ?? null,
+            thumbFinal,
+            fullFinal,
           ]
         );
+        const invoiceItemId = Number(res.insertId || 0);
+
+        // Enqueue background upload jika data berupa data URL gambar
+        if (it.imageDataUrl && isDataUrl(it.imageDataUrl)) {
+          await enqueueUploadJob({ invoiceId, invoiceItemId, itemIndex: i, kind: "thumb", dataUrl: String(it.imageDataUrl) });
+        }
+        if (it.fullImageDataUrl && isDataUrl(it.fullImageDataUrl)) {
+          await enqueueUploadJob({ invoiceId, invoiceItemId, itemIndex: i, kind: "full", dataUrl: String(it.fullImageDataUrl) });
+        }
       }
+
+      // Tulis log pembuatan invoice
+      const totalGrand = items.reduce((acc, it) => acc + Number(it.totalPrice || 0), 0);
+      const itemsCount = items.length;
+      const detailsStr = `method=${paymentMethod || ""}; items=${itemsCount}; total=${totalGrand}; customer=${rawName}:${normalizedWa}`;
+      try {
+        await conn.query(
+          `INSERT INTO logs (user_id, action, invoice_id, details) VALUES (?, 'create_invoice', ?, ?)`,
+          [String(payload.id), invoiceId, detailsStr]
+        );
+      } catch {}
 
       await conn.commit();
       conn.release();
-      return NextResponse.json({ ok: true, invoice: { id: invoiceId } }, { status: 200 });
+      return NextResponse.json({ ok: true, invoice: { id: invoiceId }, images: savedImages }, { status: 200 });
     } catch (e) {
       await conn.rollback();
       conn.release();
@@ -194,6 +364,12 @@ export async function GET(req: NextRequest) {
     const groupBy = url.searchParams.get("groupBy");   // agregasi khusus, misal: fruit
     const meta = (url.searchParams.get("meta") || "").toLowerCase(); // meta endpoint ringkas
     const range = (url.searchParams.get("range") || "").toLowerCase(); // dukungan range cepat
+    const mineParam = (url.searchParams.get("mine") || "").toLowerCase() === "true"; // filter khusus milik user sendiri
+
+    // Baca session untuk kebutuhan filter "mine"
+    const cookieStore = await cookies();
+    const token = cookieStore.get(SESSION_COOKIE)?.value || "";
+    const payload = token ? verifySessionToken(token) : null;
 
     const pool = getPool();
     const conn = await pool.getConnection();
@@ -202,7 +378,8 @@ export async function GET(req: NextRequest) {
       await conn.query(`CREATE TABLE IF NOT EXISTS invoices (
         id CHAR(36) PRIMARY KEY,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        payment_method VARCHAR(16) NULL
+        payment_method VARCHAR(16) NULL,
+        user_id CHAR(36) NULL
       ) ENGINE=InnoDB`);
       await conn.query(`CREATE TABLE IF NOT EXISTS invoice_items (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -218,15 +395,21 @@ export async function GET(req: NextRequest) {
 
       // Meta endpoint: fingerprint perubahan untuk 24 jam terakhir agar seeding efisien
       if (meta === "last24") {
-        const [[cntRow]] = await conn.query<RowDataPacket[]>(
-          `SELECT COUNT(*) AS cnt, MAX(created_at) AS latest, COUNT(payment_method) AS paid
-           FROM invoices WHERE created_at >= NOW() - INTERVAL 1 DAY`
-        );
-        const [[revRow]] = await conn.query<RowDataPacket[]>(
-          `SELECT COALESCE(SUM(ii.total_price), 0) AS revenue
+        // Jika diminta hanya milik user sendiri, pastikan user terautentikasi dan filter berdasarkan user_id
+        let cntSql = `SELECT COUNT(*) AS cnt, MAX(created_at) AS latest, COUNT(payment_method) AS paid
+           FROM invoices WHERE created_at >= NOW() - INTERVAL 1 DAY`;
+        let revSql = `SELECT COALESCE(SUM(ii.total_price), 0) AS revenue
            FROM invoice_items ii JOIN invoices i ON ii.invoice_id = i.id
-           WHERE i.created_at >= NOW() - INTERVAL 1 DAY`
-        );
+           WHERE i.created_at >= NOW() - INTERVAL 1 DAY`;
+        const paramsMeta: string[] = [];
+        if (mineParam) {
+          if (!payload) { conn.release(); return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }); }
+          cntSql += ` AND user_id = ?`;
+          revSql += ` AND i.user_id = ?`;
+          paramsMeta.push(String(payload.id));
+        }
+        const [[cntRow]] = paramsMeta.length ? await conn.query<RowDataPacket[]>(cntSql, paramsMeta) : await conn.query<RowDataPacket[]>(cntSql);
+        const [[revRow]] = paramsMeta.length ? await conn.query<RowDataPacket[]>(revSql, paramsMeta) : await conn.query<RowDataPacket[]>(revSql);
         const count = Number((cntRow as RowDataPacket)?.cnt || 0);
         const latest = String((cntRow as RowDataPacket)?.latest || "");
         const paid = Number((cntRow as RowDataPacket)?.paid || 0);
@@ -248,6 +431,11 @@ export async function GET(req: NextRequest) {
           paramsFruit.push(`%${q}%`);
           paramsFruit.push(`%${q}%`);
           paramsFruit.push(`%${q}%`);
+        }
+        if (mineParam) {
+          if (!payload) { conn.release(); return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }); }
+          wherePartsFruit.push("i.user_id = ?");
+          paramsFruit.push(String(payload.id));
         }
         const whereSqlFruit = wherePartsFruit.length ? `WHERE ${wherePartsFruit.join(" AND ")}` : "";
 
@@ -285,6 +473,11 @@ export async function GET(req: NextRequest) {
         whereParts.push("(i.id LIKE ? OR i.payment_method LIKE ?)");
         params.push(`%${q}%`);
         params.push(`%${q}%`);
+      }
+      if (mineParam) {
+        if (!payload) { conn.release(); return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }); }
+        whereParts.push("i.user_id = ?");
+        params.push(String(payload.id));
       }
       const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/utils/db";
 import type { RowDataPacket, ResultSetHeader, PoolConnection } from "mysql2/promise";
 import { FRUIT_PRICES } from "@/utils/price";
+import { cookies } from "next/headers";
+import { SESSION_COOKIE, verifySessionToken } from "@/utils/auth";
 
 // Helper untuk mengekstrak pesan error secara aman
 const getErrorMessage = (e: unknown): string => {
@@ -19,6 +21,20 @@ async function migratePricesSchema(conn: PoolConnection) {
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY unique_fruit (fruit)
   ) ENGINE=InnoDB`);
+}
+
+// Guard: hanya superadmin yang boleh mengubah daftar harga
+async function requireSuperadmin(): Promise<{ ok: true } | { ok: false; res: NextResponse }> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value || "";
+  const payload = token ? verifySessionToken(token) : null;
+  if (!payload) {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }) };
+  }
+  if (payload.role !== "superadmin") {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }) };
+  }
+  return { ok: true };
 }
 
 export async function GET() {
@@ -47,6 +63,8 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const guard = await requireSuperadmin();
+  if (!guard.ok) return guard.res;
   try {
     const body = await req.json();
     const { prices, remove } = body || {};

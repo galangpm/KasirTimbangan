@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getPool } from "@/utils/db"
 import type { RowDataPacket, ResultSetHeader } from "mysql2/promise"
+import { cookies } from "next/headers"
+import { SESSION_COOKIE, verifySessionToken } from "@/utils/auth"
 
 // Helper untuk mengekstrak pesan error secara aman
 const getErrorMessage = (e: unknown): string => {
@@ -10,7 +12,15 @@ const getErrorMessage = (e: unknown): string => {
 };
 
 // Tipe baris untuk hasil query
-type InvoiceRow = RowDataPacket & { id: string; created_at: string; payment_method: string | null; notes: string | null };
+type InvoiceRow = RowDataPacket & {
+  id: string;
+  created_at: string;
+  payment_method: string | null;
+  notes: string | null;
+  customer_uuid: string | null;
+  customer_name: string | null;
+  customer_whatsapp: string | null;
+};
 type InvoiceItemRow = RowDataPacket & {
   id: string;
   fruit: string;
@@ -21,20 +31,64 @@ type InvoiceItemRow = RowDataPacket & {
   full_image_data_url: string | null;
 };
 
+// Guards RBAC
+async function requireSuperadmin(): Promise<{ ok: true } | { ok: false; res: NextResponse }> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value || "";
+  const payload = token ? verifySessionToken(token) : null;
+  if (!payload) {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }) };
+  }
+  if (payload.role !== "superadmin") {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }) };
+  }
+  return { ok: true };
+}
+
+async function requireKasirOrSuperadmin(): Promise<{ ok: true } | { ok: false; res: NextResponse }> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value || "";
+  const payload = token ? verifySessionToken(token) : null;
+  if (!payload) {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }) };
+  }
+  if (payload.role !== "kasir" && payload.role !== "superadmin") {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }) };
+  }
+  return { ok: true };
+}
+
 export async function GET(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  // Izinkan kasir mengakses detail hanya untuk invoice miliknya; superadmin bebas
+  const guard = await requireKasirOrSuperadmin();
+  if (!guard.ok) return guard.res;
   const { id } = await context.params
   try {
     const pool = getPool()
     const conn = await pool.getConnection()
     try {
+      // Ambil payload untuk mengetahui role dan id user
+      const cookieStore = await cookies();
+      const token = cookieStore.get(SESSION_COOKIE)?.value || "";
+      const payload = token ? verifySessionToken(token) : null;
+
+      const whereUser = (payload && payload.role === "kasir") ? " AND i.user_id = ?" : "";
+      const params: any[] = [id];
+      if (whereUser) params.push(String(payload?.id || ""));
+
       const [invRows] = await conn.query<InvoiceRow[]>(
-        `SELECT id, created_at, payment_method, COALESCE(notes, NULL) AS notes FROM invoices WHERE id = ? LIMIT 1`,
-        [id]
+        `SELECT i.id, i.created_at, i.payment_method, COALESCE(i.notes, NULL) AS notes,
+                c.uuid AS customer_uuid, c.name AS customer_name, c.whatsapp AS customer_whatsapp
+         FROM invoices i
+         LEFT JOIN customers c ON i.customer_uuid = c.uuid
+         WHERE i.id = ?${whereUser}
+         LIMIT 1`,
+        params
       )
       const inv = invRows[0]
       if (!inv) {
         conn.release()
-        return NextResponse.json({ ok: false, error: "Nota tidak ditemukan" }, { status: 404 })
+        return NextResponse.json({ ok: false, error: "Nota tidak ditemukan atau bukan milik Anda" }, { status: 404 })
       }
 
       const [items] = await conn.query<InvoiceItemRow[]>(
@@ -55,6 +109,8 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
 }
 
 export async function DELETE(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  const guard = await requireSuperadmin();
+  if (!guard.ok) return guard.res;
   const { id } = await context.params;
   try {
     const pool = getPool();
@@ -80,6 +136,8 @@ export async function DELETE(req: NextRequest, context: { params: Promise<{ id: 
 }
 
 export async function PATCH(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  const guard = await requireKasirOrSuperadmin();
+  if (!guard.ok) return guard.res;
   const { id } = await context.params;
   try {
     const body = await req.json();

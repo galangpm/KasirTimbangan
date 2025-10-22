@@ -14,8 +14,8 @@ type FlashState = {
 export const useFlashStore = create<FlashState>((set) => ({
   messages: [],
   show: (type, text, timeoutMs = 4000) => {
-    const id = typeof crypto !== "undefined" && (crypto as any).randomUUID
-      ? (crypto as any).randomUUID()
+    const id = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+      ? crypto.randomUUID()
       : `${Date.now()}-${Math.random()}`;
     set((s) => ({ messages: [...s.messages, { id, type, text, timeoutMs }] }));
     return id;

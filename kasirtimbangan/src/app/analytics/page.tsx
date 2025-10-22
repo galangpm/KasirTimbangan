@@ -1,5 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useFlashStore } from "@/store/flashStore";
 
 type InvoiceSummary = {
   id: string;
@@ -234,6 +236,8 @@ function BarChart({ data }: { data: Array<{ label: string; value: number; avgWei
 }
 
 export default function AnalyticsPage() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
   const [q, setQ] = useState<string>("");
@@ -242,7 +246,7 @@ export default function AnalyticsPage() {
   const [fruitRows, setFruitRows] = useState<FruitAnalyticsRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-
+  // Purge caches that exceed TTL on start
   useEffect(() => {
     // Purge caches that exceed TTL on start
     scheduleIdle(() => {
@@ -275,13 +279,37 @@ export default function AnalyticsPage() {
     }
   }, [dateFrom, dateTo, q]);
 
-  // Penjadwalan seeding background setiap 15 menit (idle-friendly)
+  // Access protection: superadmin only
   useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        const data = await res.json();
+        if (!data?.user) {
+          router.replace("/login");
+          return;
+        }
+        if (String(data.user.role || "") !== "superadmin") {
+          useFlashStore.getState().show("warning", "Akses ditolak: hanya untuk superadmin");
+          router.replace("/");
+          return;
+        }
+        setAuthChecked(true);
+      } catch {
+        router.replace("/login");
+      }
+    };
+    check();
+  }, [router]);
+  // Penjadwalan seeding background setiap 15 menit (idle-friendly)
+  // Letakkan hooks di atas gating dan guard eksekusi di dalam callback
+  useEffect(() => {
+    if (!authChecked) return;
     const runIdle = () => scheduleIdle(seed);
     runIdle();
     const id = setInterval(runIdle, SEED_INTERVAL_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [authChecked]);
 
   const load = async () => {
     setLoading(true);
@@ -332,6 +360,9 @@ export default function AnalyticsPage() {
     const top = fruitRows.slice(0, 10);
     return top.map((r) => ({ label: r.fruit, value: Math.round(r.revenue), avgWeightKg: r.items_count > 0 ? r.total_kg / r.items_count : 0 }));
   }, [fruitRows]);
+
+  // Render skeleton setelah semua hooks dideklarasikan
+  if (!authChecked) return <div className="neo-card p-4">Memeriksa akses...</div>;
 
   return (
     <div className="p-4 space-y-4">

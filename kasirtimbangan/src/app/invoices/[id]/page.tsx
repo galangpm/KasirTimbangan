@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import PaymentModal from "@/components/PaymentModal";
+import { buildReceipt58 } from "@/utils/receipt";
 import QRCode from "qrcode";
 import { cacheGet } from "@/utils/invoiceCache";
 import { useFlashStore } from "@/store/flashStore";
@@ -27,10 +28,13 @@ interface InvoiceItemRow {
 interface InvoiceDetail { invoice: InvoiceHeader; items: InvoiceItemRow[]; }
 
 export default function InvoiceDetailPage() {
+  const router = useRouter();
   const params = useParams();
   const id = String(params?.id || "");
   const search = useSearchParams();
   const printMode = search.get("print") === "1";
+  const [authChecked, setAuthChecked] = useState(false);
+  const [cashierName, setCashierName] = useState<string>("");
   const [data, setData] = useState<InvoiceDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [openPay, setOpenPay] = useState(false);
@@ -43,7 +47,16 @@ export default function InvoiceDetailPage() {
     if (!id) return;
     const cached = cacheGet(id);
     if (cached) {
-      setData({ invoice: cached.invoice, items: cached.items as any });
+      const items = ((cached.items || []) as Array<Partial<InvoiceItemRow>>).map((it) => ({
+        id: String(it.id ?? ""),
+        fruit: String(it.fruit ?? ""),
+        weight_kg: Number(it.weight_kg || 0),
+        price_per_kg: Number(it.price_per_kg || 0),
+        total_price: Number(it.total_price || 0),
+        image_data_url: (it as Partial<InvoiceItemRow>).image_data_url ?? null,
+        full_image_data_url: (it as Partial<InvoiceItemRow>).full_image_data_url ?? null,
+      }));
+      setData({ invoice: cached.invoice, items });
     }
   }, [id]);
 
@@ -85,6 +98,30 @@ export default function InvoiceDetailPage() {
   useEffect(() => { fetchDetail(); }, [fetchDetail]);
   useEffect(() => { fetchSettings(); }, [fetchSettings]);
 
+  // Access protection: superadmin only
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        const data = await res.json();
+        if (!data?.user) {
+          router.replace("/login");
+          return;
+        }
+        if (String(data.user.role || "") !== "superadmin") {
+          useFlashStore.getState().show("warning", "Akses ditolak: hanya untuk superadmin");
+          router.replace("/");
+          return;
+        }
+        setCashierName(String(data.user.username || ""));
+        setAuthChecked(true);
+      } catch {
+        router.replace("/login");
+      }
+    };
+    check();
+  }, [router]);
+
   useEffect(() => {
     // Generate QR untuk UUID nota ketika data sudah tersedia
     if (data?.invoice?.id) {
@@ -98,24 +135,20 @@ export default function InvoiceDetailPage() {
 
   const receiptText = useMemo(() => {
     if (!data) return "";
-    const name = settings?.name || "Kasir Timbangan";
-    const address = settings?.address || "";
-    const phone = settings?.phone || "";
-    const receiptFooter = settings?.receiptFooter || "Terima kasih!";
-    const businessHeader = `${name}\n${address ? address + "\n" : ""}${phone ? "Telp: " + phone + "\n" : ""}`;
-    const header = `${businessHeader}Nota Kasir\nID: ${data.invoice.id}\nTanggal: ${new Date(data.invoice.created_at).toLocaleString("id-ID")}\nMetode: ${data.invoice.payment_method ?? "-"}\n`;
-    const lines = data.items.map((it) => {
-      const w = Number(it.weight_kg).toFixed(3);
-      const p = Number(it.price_per_kg).toLocaleString("id-ID");
-      const t = Number(it.total_price).toLocaleString("id-ID");
-      return `${it.fruit.padEnd(10)} ${w} kg x Rp ${p} = Rp ${t}`;
-    }).join("\n");
-    const total = data.items.reduce((acc, it) => acc + Number(it.total_price || 0), 0);
-    const footer = `\nTotal: Rp ${total.toLocaleString("id-ID")}\n${receiptFooter}`;
-    // Integrate QR into receipt text: show data URL string after footer
-    const qrSection = qrDataUrl ? `\nQR Code:\n ${qrDataUrl} ` : "";
-    return header + "\n" + lines + "\n" + footer + qrSection;
-  }, [data, settings, qrDataUrl]);
+    const simple = {
+      invoice: data.invoice,
+      items: data.items.map((it) => ({
+        id: it.id,
+        fruit: it.fruit,
+        weight_kg: it.weight_kg,
+        price_per_kg: it.price_per_kg,
+        total_price: it.total_price,
+      })),
+    };
+    return buildReceipt58(simple, settings, cashierName, String(data.invoice?.customer_name || ""));
+  }, [data, settings, cashierName]);
+
+  if (!authChecked) return <div className="neo-card p-4">Memeriksa akses...</div>;
 
   return (
     <div className="p-4 space-y-4">
@@ -203,6 +236,19 @@ export default function InvoiceDetailPage() {
           <div className="mt-3">Data tidak tersedia</div>
         )}
       </div>
+
+      {data && (
+        <div className="neo-card p-3">
+          <h3 className="text-lg font-semibold mb-2">Preview Nota</h3>
+          <pre className="whitespace-pre-wrap text-sm bg-slate-50 p-3 rounded border max-h-[50vh] overflow-auto">{receiptText}</pre>
+          {qrDataUrl ? (
+            <div className="mt-3 flex justify-center">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={qrDataUrl} alt="QR UUID Nota" className="w-32 h-32" />
+            </div>
+          ) : null}
+        </div>
+      )}
 
       {!printMode && (
         <PaymentModal

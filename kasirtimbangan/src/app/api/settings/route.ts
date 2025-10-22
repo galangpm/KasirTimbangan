@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/utils/db";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import { cookies } from "next/headers";
+import { SESSION_COOKIE, verifySessionToken } from "@/utils/auth";
 
 // Helper untuk mengekstrak pesan error secara aman
 const getErrorMessage = (e: unknown): string => {
@@ -18,6 +20,20 @@ async function migrateSettingsSchema(conn: PoolConnection) {
     receipt_footer VARCHAR(512) NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   ) ENGINE=InnoDB`);
+}
+
+// Guard: hanya superadmin yang boleh mengubah pengaturan
+async function requireSuperadmin(): Promise<{ ok: true } | { ok: false; res: NextResponse }> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value || "";
+  const payload = token ? verifySessionToken(token) : null;
+  if (!payload) {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }) };
+  }
+  if (payload.role !== "superadmin") {
+    return { ok: false, res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }) };
+  }
+  return { ok: true };
 }
 
 export async function GET() {
@@ -60,6 +76,8 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const guard = await requireSuperadmin();
+  if (!guard.ok) return guard.res;
   try {
     const body = await req.json();
     const { name, address, phone, receiptFooter } = body || {};

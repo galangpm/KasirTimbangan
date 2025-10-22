@@ -3,8 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import PaymentModal from "@/components/PaymentModal";
+import ReceiptPreviewModal from "@/components/ReceiptPreviewModal";
+import { buildReceipt58 } from "@/utils/receipt";
+import { connectAndPrintTextAndQR } from "@/utils/bluetoothPrint";
+import QRCode from "qrcode";
 import { cacheGet, cacheUpdatePayment } from "@/utils/invoiceCache";
 import { useFlashStore } from "@/store/flashStore";
+import { useRouter } from "next/navigation";
 
 // Tipe eksplisit untuk data invoice
 interface InvoiceListRow {
@@ -42,6 +47,8 @@ const getErrorMessage = (e: unknown): string => {
 };
 
 export default function InvoicesPage() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
   const [rows, setRows] = useState<InvoiceListRow[]>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -56,6 +63,12 @@ export default function InvoicesPage() {
   const closeDetailBtnRef = useRef<HTMLButtonElement | null>(null);
   const [payModalOpen, setPayModalOpen] = useState(false);
   const [payModalInvoiceId, setPayModalInvoiceId] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewReceiptText, setPreviewReceiptText] = useState<string>("");
+  const [previewQrDataUrl, setPreviewQrDataUrl] = useState<string | null>(null);
+  const [previewQrUuid, setPreviewQrUuid] = useState<string | null>(null);
+  const [settings, setSettings] = useState<{ name: string; address: string; phone: string; receiptFooter: string } | null>(null);
+  const [cashierName, setCashierName] = useState<string>("");
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -86,6 +99,40 @@ export default function InvoicesPage() {
   }, [queryString]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  const fetchSettings = useCallback(async () => {
+    try {
+      const res = await fetch("/api/settings");
+      const json = await res.json();
+      if (res.ok) setSettings(json.settings || null);
+    } catch {}
+  }, []);
+  useEffect(() => { fetchSettings(); }, [fetchSettings]);
+
+  // Access protection: superadmin only
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        const data = await res.json();
+        if (!data?.user) {
+          router.replace("/login");
+          return;
+        }
+        if (String(data.user.role || "") !== "superadmin") {
+          useFlashStore.getState().show("warning", "Akses ditolak: hanya untuk superadmin");
+          router.replace("/");
+          return;
+        }
+        setCashierName(String(data.user.username || ""));
+        setAuthChecked(true);
+      } catch {
+        router.replace("/login");
+      }
+    };
+    check();
+  }, [router]);
+  
 
   const exportCsv = () => {
     const headers = ["Invoice ID","Tanggal","Metode","Status","Jumlah Item","Total"];
@@ -134,12 +181,12 @@ export default function InvoicesPage() {
       if (cached) {
         setDetailData({
           invoice: cached.invoice,
-          items: (cached.items || []).map((it: any) => ({
-            id: it.id,
-            fruit: it.fruit,
-            weight_kg: it.weight_kg,
-            price_per_kg: it.price_per_kg,
-            total_price: it.total_price,
+          items: ((cached.items || []) as Array<Partial<InvoiceItemRow>>).map((it) => ({
+            id: String(it.id ?? ""),
+            fruit: String(it.fruit ?? ""),
+            weight_kg: Number(it.weight_kg || 0),
+            price_per_kg: Number(it.price_per_kg || 0),
+            total_price: Number(it.total_price || 0),
           })),
         });
         setDetailId(id);
@@ -158,6 +205,65 @@ export default function InvoicesPage() {
   const openPayModal = (id: string) => {
     setPayModalInvoiceId(id);
     setPayModalOpen(true);
+  };
+
+  const openPreviewModal = async (id: string) => {
+    try {
+      // Quick preview from cache
+      const cached = cacheGet(id);
+      if (cached) {
+        const simple = {
+          invoice: cached.invoice,
+          items: (cached.items || []).map((it) => ({
+            id: String(it.id || ""),
+            fruit: String(it.fruit || ""),
+            weight_kg: Number(it.weight_kg || 0),
+            price_per_kg: Number(it.price_per_kg || 0),
+            total_price: Number(it.total_price || 0),
+          })),
+        };
+        const text = buildReceipt58(simple, settings, cashierName);
+        setPreviewReceiptText(text);
+        setPreviewQrUuid(id);
+        try { const url = await QRCode.toDataURL(id, { width: 256, margin: 0 }); setPreviewQrDataUrl(url); } catch { setPreviewQrDataUrl(null); }
+        setPreviewOpen(true);
+      }
+      // Always fetch fresh from server
+      const res = await fetch(`/api/invoices/${id}`);
+      const data: (InvoiceDetail & { error?: string }) = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Gagal memuat detail nota");
+      const simple2 = {
+        invoice: data.invoice,
+        items: (data.items || []).map((it) => ({
+          id: String(it.id || ""),
+          fruit: String(it.fruit || ""),
+          weight_kg: Number(it.weight_kg || 0),
+          price_per_kg: Number(it.price_per_kg || 0),
+          total_price: Number(it.total_price || 0),
+        })),
+      };
+      const text2 = buildReceipt58(simple2, settings, cashierName, String(data.invoice?.customer_name || ""));
+      setPreviewReceiptText(text2);
+      setPreviewQrUuid(id);
+      if (!previewOpen) setPreviewOpen(true);
+      try { const url2 = await QRCode.toDataURL(id, { width: 256, margin: 0 }); setPreviewQrDataUrl(url2); } catch { setPreviewQrDataUrl(null); }
+    } catch (e: unknown) {
+      useFlashStore.getState().show("error", getErrorMessage(e));
+    }
+  };
+
+  const handlePrintPreview = async () => {
+    try {
+      if (!previewReceiptText || !previewQrUuid) {
+        useFlashStore.getState().show("warning", "Preview belum siap untuk dicetak");
+        return;
+      }
+      await connectAndPrintTextAndQR(previewReceiptText, previewQrUuid);
+      useFlashStore.getState().show("success", "Cetak dikirim ke printer");
+      setPreviewOpen(false);
+    } catch (e: unknown) {
+      useFlashStore.getState().show("error", getErrorMessage(e));
+    }
   };
 
   const onPayFromList = async (method: "cash" | "card" | "qr" | "tester" | "gift", notes?: string) => {
@@ -220,6 +326,9 @@ export default function InvoicesPage() {
       window.removeEventListener("resize", onResize);
     };
   }, [menuState]);
+
+  // Render skeleton setelah semua hooks dideklarasikan
+  if (!authChecked) return <div className="neo-card p-4">Memeriksa akses...</div>;
 
   const deleteInvoice = async (id: string) => {
     if (!confirm("Hapus nota ini? Tindakan ini tidak dapat dibatalkan.")) return;
@@ -347,7 +456,7 @@ export default function InvoicesPage() {
             <div className="neo-dropdown min-w-[220px]">
               <button className="block w-full text-left px-3 py-2 hover:bg-slate-100" onClick={() => { openDetail(menuState.id); setMenuState(null); }}>Detail (Modal)</button>
               <Link href={`/invoices/${menuState.id}`} className="block px-3 py-2 hover:bg-slate-100" onClick={() => setMenuState(null)}>Halaman Detail</Link>
-              <Link href={`/invoices/${menuState.id}?print=1`} className="block px-3 py-2 hover:bg-slate-100" onClick={() => setMenuState(null)}>Preview/Print</Link>
+              <button className="block w-full text-left px-3 py-2 hover:bg-slate-100" onClick={() => { openPreviewModal(menuState.id); setMenuState(null); }}>Preview/Print</button>
               <button className="block w-full text-left px-3 py-2 hover:bg-slate-100 text-red-600" onClick={() => { deleteInvoice(menuState.id); setMenuState(null); }}>Hapus Nota</button>
             </div>
           </div>
@@ -426,6 +535,13 @@ export default function InvoicesPage() {
         open={payModalOpen}
         onClose={() => { setPayModalOpen(false); setPayModalInvoiceId(null); }}
         onPay={onPayFromList}
+      />
+      <ReceiptPreviewModal
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        receiptText={previewReceiptText}
+        qrDataUrl={previewQrDataUrl}
+        onPrint={handlePrintPreview}
       />
     </div>
   );

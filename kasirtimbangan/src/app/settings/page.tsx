@@ -1,8 +1,11 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
 import { useFlashStore } from "@/store/flashStore";
+import { useRouter } from "next/navigation";
 
 export default function SettingsPage() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
   // Hapus penggunaan store lokal, gunakan state lokal yang diambil dari DB
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
@@ -26,6 +29,31 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [newFruit, setNewFruit] = useState("");
   const [newPrice, setNewPrice] = useState("");
+
+  // Proteksi akses: hanya superadmin
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        const data = await res.json();
+        if (!data?.user) {
+          router.replace("/login");
+          return;
+        }
+        if (String(data.user.role || "") !== "superadmin") {
+          useFlashStore.getState().show("warning", "Akses ditolak: hanya untuk superadmin");
+          router.replace("/");
+          return;
+        }
+        setAuthChecked(true);
+      } catch {
+        router.replace("/login");
+      }
+    };
+    check();
+  }, [router]);
+
+  // Hooks di bawah harus tetap dipanggil setiap render; gating dilakukan di dalam efek
 
   const validateSettings = () => {
     const errs: { name?: string; address?: string; phone?: string; receiptFooter?: string } = {};
@@ -64,8 +92,10 @@ export default function SettingsPage() {
       setSLoading(false);
     }
   }, []);
-
-  useEffect(() => { loadSettings(); }, [loadSettings]);
+  useEffect(() => {
+    if (!authChecked) return;
+    loadSettings();
+  }, [authChecked, loadSettings]);
 
   const saveSettings = async () => {
     if (!validateSettings()) return;
@@ -102,8 +132,10 @@ export default function SettingsPage() {
       setLoading(false);
     }
   }, []);
-
-  useEffect(() => { loadPrices(); }, [loadPrices]);
+  useEffect(() => {
+    if (!authChecked) return;
+    loadPrices();
+  }, [authChecked, loadPrices]);
 
   const saveAll = async () => {
     setSaving(true);
@@ -144,6 +176,8 @@ export default function SettingsPage() {
   const removeRow = (fruit: string) => {
     setPrices((list) => list.filter((p) => p.fruit !== fruit));
   };
+
+  if (!authChecked) return <div className="neo-card p-4">Memeriksa akses...</div>;
 
   return (
     <div className="p-4 space-y-6">
