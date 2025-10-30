@@ -5,6 +5,7 @@ import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
 import Sidebar from "@/components/Sidebar";
 import InvoiceSeed from "@/components/InvoiceSeed";
 import FlashHost from "@/components/FlashHost";
+import NeoShellContent from "@/components/NeoShellContent";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -34,16 +35,16 @@ export default function RootLayout({
         {/* Flash messages at the top of the page */}
         <FlashHost />
         {/* Shell layout: Sidebar + content */}
-        <div className="md:flex md:min-h-screen bg-gray-50">
+        <div className="md:flex min-h-[100dvh] md:min-h-screen neo-shell">
           <Sidebar />
           <main className="flex-1">
             {/* Push content below mobile top-nav */}
             <div className="md:hidden h-0">
               {/* spacer not needed because nav is sticky, but keep container */}
             </div>
-            <div className="p-3 md:p-6">
+            <NeoShellContent>
               {children}
-            </div>
+            </NeoShellContent>
           </main>
         </div>
         {/* Registrasi Service Worker untuk PWA offline */}
