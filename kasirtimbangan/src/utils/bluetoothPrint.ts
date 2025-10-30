@@ -14,6 +14,8 @@ interface BluetoothRemoteGATTService {
 interface BluetoothRemoteGATTCharacteristic {
   properties: { write?: boolean; writeWithoutResponse?: boolean };
   writeValue(data: BufferSource): Promise<void>;
+  // Beberapa perangkat hanya mendukung write tanpa response
+  writeValueWithoutResponse?(data: BufferSource): Promise<void>;
 }
 
 export async function connectAndPrint(text: string) {
@@ -27,6 +29,9 @@ export async function connectAndPrint(text: string) {
     "0000ffe1-0000-1000-8000-00805f9b34fb",
     "0000ffe5-0000-1000-8000-00805f9b34fb",
     "000018f0-0000-1000-8000-00805f9b34fb",
+    // Tambahan umum untuk UART transparan
+    "0000fff0-0000-1000-8000-00805f9b34fb",
+    "0000fff1-0000-1000-8000-00805f9b34fb",
   ];
   const device = await n.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: COMMON_BLE_PRINTER_SERVICES });
   const server = await device.gatt!.connect();
@@ -48,8 +53,15 @@ export async function connectAndPrint(text: string) {
         const props = ch.properties;
         if (props.write || props.writeWithoutResponse) {
           const encoder = new TextEncoder();
+          const init = new Uint8Array([0x1B, 0x40]); // ESC @ init
+          // tulis init dengan metode yang didukung
+          if (props.writeWithoutResponse && typeof ch.writeValueWithoutResponse === "function") await ch.writeValueWithoutResponse(init);
+          else await ch.writeValue(init);
+
           const payload = encoder.encode(text + "\n\n");
-          await ch.writeValue(payload);
+          // Gunakan write tanpa response jika tersedia untuk kompatibilitas
+          if (props.writeWithoutResponse && typeof ch.writeValueWithoutResponse === "function") await ch.writeValueWithoutResponse(payload);
+          else await ch.writeValue(payload);
           return;
         }
       } catch {
@@ -72,6 +84,8 @@ async function findWritableCharacteristic(): Promise<BluetoothRemoteGATTCharacte
     "0000ffe1-0000-1000-8000-00805f9b34fb",
     "0000ffe5-0000-1000-8000-00805f9b34fb",
     "000018f0-0000-1000-8000-00805f9b34fb",
+    "0000fff0-0000-1000-8000-00805f9b34fb",
+    "0000fff1-0000-1000-8000-00805f9b34fb",
   ];
   const device = await n.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: COMMON_BLE_PRINTER_SERVICES });
   const server = await device.gatt!.connect();
@@ -98,10 +112,15 @@ async function findWritableCharacteristic(): Promise<BluetoothRemoteGATTCharacte
 }
 
 // Helper: tulis data besar dalam beberapa chunk agar aman untuk BLE
-async function writeChunks(ch: BluetoothRemoteGATTCharacteristic, data: Uint8Array, chunkSize = 180) {
+async function writeChunks(ch: BluetoothRemoteGATTCharacteristic, data: Uint8Array, chunkSize = 20) {
   for (let i = 0; i < data.length; i += chunkSize) {
     const slice = data.slice(i, Math.min(i + chunkSize, data.length));
-    await ch.writeValue(slice);
+    // Prefer write tanpa response bila didukung
+    if (ch.properties.writeWithoutResponse && typeof ch.writeValueWithoutResponse === "function") {
+      await ch.writeValueWithoutResponse(slice);
+    } else {
+      await ch.writeValue(slice);
+    }
     // beri jeda kecil agar perangkat tidak kewalahan
     await new Promise((r) => setTimeout(r, 5));
   }
@@ -141,6 +160,8 @@ function buildEscPosQrBytes(payload: string, size = 6, ecc: "L" | "M" | "Q" | "H
 export async function connectAndPrintTextAndQR(text: string, qrUuid: string) {
   const ch = await findWritableCharacteristic();
   const enc = new TextEncoder();
+  // Inisialisasi printer
+  await writeChunks(ch, new Uint8Array([0x1B, 0x40]));
   const textBytes = enc.encode(text + "\n\n");
   await writeChunks(ch, textBytes);
   const qrBytes = buildEscPosQrBytes(qrUuid, 6, "M"); // ukuran modul 6, ECC M
