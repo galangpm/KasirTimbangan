@@ -246,6 +246,11 @@ export default function AnalyticsPage() {
   const [fruitRows, setFruitRows] = useState<FruitAnalyticsRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  const doLogout = () => {
+    // Arahkan ke route logout yang akan clear cookie dan redirect ke /login
+    window.location.assign("/api/auth/logout");
+  };
+
   // Purge caches that exceed TTL on start
   useEffect(() => {
     // Purge caches that exceed TTL on start
@@ -283,7 +288,7 @@ export default function AnalyticsPage() {
   useEffect(() => {
     const check = async () => {
       try {
-        const res = await fetch("/api/auth/me");
+        const res = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
         const data = await res.json();
         if (!data?.user) {
           router.replace("/login");
@@ -369,9 +374,12 @@ export default function AnalyticsPage() {
       <div className="neo-card p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">Analitik Jenis Buah</h2>
-          <button className="neo-button primary" onClick={load} disabled={loading}>
-            {loading ? "Memuat..." : "Terapkan Filter"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button className="neo-button secondary" onClick={doLogout}>Logout</button>
+            <button className="neo-button primary" onClick={load} disabled={loading}>
+              {loading ? "Memuat..." : "Terapkan Filter"}
+            </button>
+          </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-4">
           <div>
