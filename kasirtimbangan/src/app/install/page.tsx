@@ -17,7 +17,7 @@ export default function InstallPage() {
     append("Memvalidasi kunci...");
     if (key.trim().toLowerCase() !== "asera") {
       append("Kunci tidak valid.");
-      setResult({ ok: false, message: "Kunci salah. Masukkan 'asera'." });
+      setResult({ ok: false, message: "Kunci salah. Masukkan Kunci Installer." });
       return;
     }
 
@@ -64,7 +64,7 @@ export default function InstallPage() {
       <div className="neo-card" style={{ padding: 20 }}>
         <h2 style={{ marginBottom: 12 }}>Instal Database</h2>
         <p style={{ color: "#666", marginBottom: 16 }}>
-          Akses tanpa login menggunakan kunci instalasi. Masukkan &quot;asera&quot; sebagai kunci.
+          Akses tanpa login menggunakan kunci instalasi. Masukkan &quot;Kunci Installer&quot;.
         </p>
 
         <label htmlFor="asera-key" style={{ display: "block", marginBottom: 8 }}>Kunci Instalasi</label>
@@ -72,7 +72,7 @@ export default function InstallPage() {
           id="asera-key"
           type="password"
           className="neo-input"
-          placeholder="Masukkan kunci 'asera'"
+          placeholder="Masukkan kunci 'Kunci Installer'"
           value={key}
           onChange={(e) => setKey(e.target.value)}
           style={{ width: "100%", marginBottom: 12 }}
