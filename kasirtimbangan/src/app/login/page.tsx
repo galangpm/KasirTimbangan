@@ -12,12 +12,12 @@ export default function LoginPage() {
   useEffect(() => {
     const check = async () => {
       try {
-        const res = await fetch("/api/auth/me");
+        const res = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
         const data = await res.json();
         if (data?.user) {
           // Sudah login: arahkan sesuai role
-          if (data.user.role === "superadmin") router.replace("/analytics");
-          else router.replace("/");
+          if (data.user.role === "superadmin") window.location.assign("/analytics");
+          else window.location.assign("/");
         }
       } catch {}
     };
@@ -31,13 +31,15 @@ export default function LoginPage() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ username, password }),
       });
       const data = await res.json();
       if (!res.ok || !data?.ok) throw new Error(data?.error || "Gagal login");
       const role = String(data.user?.role || "");
-      if (role === "superadmin") router.replace("/analytics");
-      else router.replace("/");
+      // Gunakan reload penuh agar cookie sesi dipastikan aktif pada halaman berikutnya
+      if (role === "superadmin") window.location.assign("/analytics");
+      else window.location.assign("/");
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       useFlashStore.getState().show("error", message);
@@ -47,7 +49,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="max-w-md mx-auto neo-card p-4">
+    <div className="w-full max-w-md neo-card p-4">
       <h1 className="text-lg font-semibold mb-3">Login</h1>
       <form onSubmit={submit} className="space-y-3">
         <div>
@@ -60,7 +62,6 @@ export default function LoginPage() {
         </div>
         <button type="submit" className="neo-button secondary w-full" disabled={loading}>{loading ? "Mengirim..." : "Masuk"}</button>
       </form>
-      <div className="text-xs text-slate-500 mt-3">Default: superadmin/superadmin, kasir/kasir</div>
     </div>
   );
 }
