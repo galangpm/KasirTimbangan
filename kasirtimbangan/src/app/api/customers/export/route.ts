@@ -147,8 +147,10 @@ export async function GET(req: NextRequest) {
       if (start) fileNameParts.push(start.replace(/-/g, ""));
       if (end) fileNameParts.push(end.replace(/-/g, ""));
       const fileName = `${fileNameParts.join("_") || "customers_export"}.xlsx`;
+      const arr = new Uint8Array(buf);
+      const blob = new Blob([arr], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 
-      return new NextResponse(buf, {
+      return new NextResponse(blob, {
         status: 200,
         headers: {
           "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
