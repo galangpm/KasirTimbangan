@@ -41,6 +41,21 @@ body {
   box-shadow: 6px 6px 0 #000000;
 }
 
+/* Shell/container untuk seluruh halaman dengan rasa neobrutalism */
+.neo-shell {
+  background: #faf8f0; /* sedikit hangat agar kontras dengan kartu */
+  background-image: radial-gradient(#000 1px, transparent 1px);
+  background-size: 12px 12px;
+}
+
+/* Area konten utama agar konsisten jarak dan responsif */
+.neo-page {
+  padding: 0.75rem;
+}
+@media (min-width: 768px) {
+  .neo-page { padding: 1.5rem; }
+}
+
 .neo-button {
   display: inline-flex;
   align-items: center;
