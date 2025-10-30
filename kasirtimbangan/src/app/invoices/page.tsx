@@ -25,6 +25,7 @@ interface InvoiceHeader {
   created_at: string;
   payment_method: string | null;
   notes?: string | null;
+  customer_name?: string | null;
 }
 
 interface InvoiceItemRow {
@@ -69,6 +70,8 @@ export default function InvoicesPage() {
   const [previewQrUuid, setPreviewQrUuid] = useState<string | null>(null);
   const [settings, setSettings] = useState<{ name: string; address: string; phone: string; receiptFooter: string } | null>(null);
   const [cashierName, setCashierName] = useState<string>("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const selectedCount = selected.size;
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -91,6 +94,7 @@ export default function InvoicesPage() {
       setPageSize(data.pageSize || 10);
       setTotal(data.total || 0);
       setTotalPages(data.totalPages || 1);
+      setSelected(new Set());
     } catch (e: unknown) {
       useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
@@ -132,6 +136,23 @@ export default function InvoicesPage() {
     };
     check();
   }, [router]);
+  const allVisibleSelected = useMemo(() => rows.length > 0 && rows.every((r) => selected.has(r.id)), [rows, selected]);
+  const toggleSelect = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const toggleSelectAllVisible = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const ids = rows.map((r) => r.id);
+      const allSelected = ids.every((id) => next.has(id));
+      if (allSelected) ids.forEach((id) => next.delete(id)); else ids.forEach((id) => next.add(id));
+      return next;
+    });
+  };
   
 
   const exportCsv = () => {
@@ -343,6 +364,33 @@ export default function InvoicesPage() {
       useFlashStore.getState().show("error", getErrorMessage(e));
     }
   };
+  const deleteSelectedInvoices = async () => {
+    if (selected.size === 0) return;
+    if (!confirm(`Hapus ${selected.size} nota terpilih? Tindakan ini tidak dapat dibatalkan.`)) return;
+    try {
+      const ids = Array.from(selected);
+      const results = await Promise.allSettled(
+        ids.map(async (id) => {
+          const res = await fetch(`/api/invoices/${id}`, { method: "DELETE" });
+          let json: any = {};
+          try { json = await res.json(); } catch {}
+          if (!res.ok) throw new Error(json?.error || `Gagal menghapus ${id}`);
+          return id;
+        })
+      );
+      const deletedCount = results.filter((r) => r.status === "fulfilled").length;
+      const failedCount = results.filter((r) => r.status === "rejected").length;
+      await fetchData();
+      setSelected(new Set());
+      if (failedCount === 0) {
+        useFlashStore.getState().show("success", `Berhasil menghapus ${deletedCount} nota`);
+      } else {
+        useFlashStore.getState().show("warning", `Berhasil: ${deletedCount}, Gagal: ${failedCount}`);
+      }
+    } catch (e: unknown) {
+      useFlashStore.getState().show("error", getErrorMessage(e));
+    }
+  };
 
   return (
     <div className="p-4 space-y-4">
@@ -377,6 +425,12 @@ export default function InvoicesPage() {
         <div className="mt-3 flex gap-2">
           <button className="neo-button success" onClick={exportCsv}>Ekspor CSV</button>
           <button className="neo-button secondary" onClick={exportExcel}>Ekspor Excel</button>
+          <button
+            className="neo-button danger"
+            onClick={deleteSelectedInvoices}
+            disabled={selectedCount === 0}
+            title={selectedCount > 0 ? `Hapus ${selectedCount} nota terpilih` : "Pilih nota untuk dihapus"}
+          >Hapus Nota Terpilih{selectedCount > 0 ? ` (${selectedCount})` : ""}</button>
         </div>
       </div>
 
@@ -384,6 +438,9 @@ export default function InvoicesPage() {
         <table className="min-w-[720px] md:min-w-0 md:w-full text-sm neo-table">
                 <thead>
                 <tr className="bg-slate-100 text-left">
+                  <th className="px-3 py-2 whitespace-nowrap">
+                    <input type="checkbox" aria-label="Pilih semua" checked={allVisibleSelected} onChange={toggleSelectAllVisible} />
+                  </th>
                   <th className="px-3 py-2 whitespace-nowrap">Invoice ID</th>
                   <th className="px-3 py-2 whitespace-nowrap">Tanggal</th>
                   <th className="px-3 py-2 whitespace-nowrap">Metode</th>
@@ -396,12 +453,20 @@ export default function InvoicesPage() {
                 <tbody>
                 {rows.length === 0 ? (
                    <tr>
-                     <td className="px-3 py-4 text-center whitespace-nowrap" colSpan={7}>Tidak ada data</td>
+                     <td className="px-3 py-4 text-center whitespace-nowrap" colSpan={8}>Tidak ada data</td>
                    </tr>
                 ) : rows.map((r) => (
                    <tr key={r.id} className="border-t hover:bg-slate-50">
 
 
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <input
+                        type="checkbox"
+                        aria-label={`Pilih nota ${r.id}`}
+                        checked={selected.has(r.id)}
+                        onChange={() => toggleSelect(r.id)}
+                      />
+                    </td>
                     <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{r.id}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString("id-ID")}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{r.payment_method ?? "-"}</td>
