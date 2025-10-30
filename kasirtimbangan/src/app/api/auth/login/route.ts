@@ -35,12 +35,18 @@ export async function POST(req: NextRequest) {
     const role = String(user.role) as UserRole;
     const payload = buildSessionPayload(String(user.id), String(user.username), role);
     const token = createSessionToken(payload);
+
+    // Tentukan apakah request di belakang HTTPS (mis. reverse proxy) untuk set flag secure dengan benar
+    const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || "";
+    const forwardedSsl = req.headers.get("x-forwarded-ssl") || "";
+    const isHttps = forwardedProto === "https" || forwardedSsl === "on" || req.nextUrl.protocol === "https:";
+
     const res = NextResponse.json({ ok: true, user: { id: String(user.id), username: String(user.username), role: String(user.role) } }, { status: 200 });
     res.cookies.set(SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: "lax",
       path: "/",
-      secure: process.env.NODE_ENV === "production",
+      secure: isHttps,
       maxAge: 7 * 24 * 60 * 60, // 7 hari
     });
     return res;
