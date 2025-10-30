@@ -16,6 +16,8 @@ type UploadRow = {
   attempts: number;
 };
 
+type IdRow = RowDataPacket & { id: number | string };
+
 const isDataUrlImage = (v: unknown): boolean => {
   const s = String(v || "");
   return /^data:image\/(png|jpe?g|webp);base64,/i.test(s);
@@ -43,7 +45,7 @@ async function tick() {
         `SELECT id FROM uploads WHERE status = 'queued' ORDER BY created_at ASC LIMIT ?`,
         [BATCH_LIMIT]
       );
-      const ids = (rows || []).map((r: any) => Number(r.id)).filter((n) => Number.isFinite(n));
+      const ids = (rows as IdRow[]).map((r) => Number(r.id)).filter((n) => Number.isFinite(n));
       // Lock jobs to "uploading"
       for (const id of ids) {
         await conn.query(`UPDATE uploads SET status='uploading', attempts=attempts+1, progress=0 WHERE id=? AND status='queued'`, [id]);
