@@ -15,7 +15,7 @@ const getErrorMessage = (e: unknown): string => {
 };
 
 // Tipe eksplisit untuk data detail invoice termasuk gambar
-interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; notes?: string | null; }
+interface InvoiceHeader { id: string; created_at: string; payment_method: string | null; notes?: string | null; customer_name?: string | null; }
 interface InvoiceItemRow {
   id: string;
   fruit: string;
