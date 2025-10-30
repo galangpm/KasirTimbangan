@@ -258,11 +258,7 @@ export default function Home() {
         octx.imageSmoothingQuality = "high";
         octx.drawImage(tmp, 0, 0, w, h, 0, 0, out.width, out.height);
       }
-      // Prefer WEBP untuk ukuran lebih kecil, fallback ke JPEG jika tidak didukung
-      try {
-        const webp = out.toDataURL("image/webp", quality);
-        if (webp.startsWith("data:image/webp")) return webp;
-      } catch {}
+      // Paksa JPEG agar konsisten di server (ekstensi .jpg)
       return out.toDataURL("image/jpeg", quality);
     } catch {
       return "";
