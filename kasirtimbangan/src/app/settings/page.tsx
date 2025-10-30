@@ -207,7 +207,7 @@ export default function SettingsPage() {
           </div>
           <div className="md:col-span-2">
             <label className="block text-sm mb-1">Footer Nota (ucapan/terima kasih)</label>
-            <input className="neo-input w-full" value={receiptFooter} onChange={(e) => setReceiptFooter(e.target.value)} placeholder="Terima kasih telah berbelanja!" />
+            <textarea className="neo-input w-full" rows={3} value={receiptFooter} onChange={(e) => setReceiptFooter(e.target.value)} placeholder="Terima kasih telah berbelanja!&#10;Selamat datang kembali!&#10;Hubungi kami: 08xxxx" />
             {errors.receiptFooter && <div className="text-xs text-red-600 mt-1">{errors.receiptFooter}</div>}
           </div>
         </div>
