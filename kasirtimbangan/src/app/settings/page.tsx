@@ -11,6 +11,8 @@ export default function SettingsPage() {
   const [address, setAddress] = useState("");
   const [phone, setPhone] = useState("");
   const [receiptFooter, setReceiptFooter] = useState("");
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [logoUploading, setLogoUploading] = useState(false);
   const [sLoading, setSLoading] = useState(false);
   const [sSaving, setSSaving] = useState(false);
   const [errors, setErrors] = useState<{ name?: string; address?: string; phone?: string; receiptFooter?: string }>({});
@@ -85,6 +87,7 @@ export default function SettingsPage() {
         setAddress(String(s.address || ""));
         setPhone(String(s.phone || ""));
         setReceiptFooter(String(s.receiptFooter || ""));
+        setLogoUrl(s.logoUrl ? String(s.logoUrl) : null);
       }
     } catch (e: unknown) {
       useFlashStore.getState().show("error", getErrorMessage(e));
@@ -104,7 +107,7 @@ export default function SettingsPage() {
       const res = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, address, phone, receiptFooter }),
+        body: JSON.stringify({ name, address, phone, receiptFooter, logoUrl }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error((data?.errors && data.errors.join(", ")) || data?.error || "Gagal menyimpan pengaturan usaha");
@@ -114,6 +117,36 @@ export default function SettingsPage() {
       useFlashStore.getState().show("error", getErrorMessage(e));
     } finally {
       setSSaving(false);
+    }
+  };
+
+  const onSelectLogoFile = async (file: File) => {
+    if (!file || !file.type.startsWith("image/")) {
+      useFlashStore.getState().show("warning", "Pilih file gambar (png/jpg/webp)");
+      return;
+    }
+    setLogoUploading(true);
+    try {
+      const toDataUrl = (f: File) => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = (e) => reject(e);
+        reader.readAsDataURL(f);
+      });
+      const dataUrl = await toDataUrl(file);
+      const res = await fetch("/api/settings/logo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Gagal upload logo");
+      setLogoUrl(String(data.url || ""));
+      useFlashStore.getState().show("success", "Logo berhasil diunggah");
+    } catch (e: unknown) {
+      useFlashStore.getState().show("error", getErrorMessage(e));
+    } finally {
+      setLogoUploading(false);
     }
   };
 
@@ -190,6 +223,27 @@ export default function SettingsPage() {
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="md:col-span-2">
+            <label className="block text-sm mb-1">Logo Sidebar</label>
+            <div className="flex items-center gap-3">
+              <img src={(logoUrl || "/logo.png") as string} alt="Logo" className="h-12 w-auto border rounded bg-white p-1" />
+              <label className="neo-button cursor-pointer">
+                {logoUploading ? "Mengunggah..." : "Pilih Logo"}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onSelectLogoFile(f);
+                    e.currentTarget.value = ""; // reset agar bisa pilih file sama lagi
+                  }}
+                  disabled={logoUploading}
+                />
+              </label>
+            </div>
+            <div className="text-xs text-slate-500 mt-1">Disarankan rasio mendatar (mis. 3:1) dan latar transparan.</div>
+          </div>
           <div>
             <label className="block text-sm mb-1">Nama Usaha</label>
             <input className="neo-input w-full" value={name} onChange={(e) => setName(e.target.value)} placeholder="Kasir Timbangan" />
