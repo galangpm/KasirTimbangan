@@ -39,7 +39,9 @@ export async function POST(req: NextRequest) {
     // Tentukan apakah request di belakang HTTPS (mis. reverse proxy) untuk set flag secure dengan benar
     const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || "";
     const forwardedSsl = req.headers.get("x-forwarded-ssl") || "";
-    const isHttps = forwardedProto === "https" || forwardedSsl === "on" || req.nextUrl.protocol === "https:";
+    // Gunakan WHATWG URL API yang lebih aman daripada req.nextUrl.protocol
+    const url = new URL(req.url);
+    const isHttps = forwardedProto === "https" || forwardedSsl === "on" || url.protocol === "https:";
 
     const res = NextResponse.json({ ok: true, user: { id: String(user.id), username: String(user.username), role: String(user.role) } }, { status: 200 });
     res.cookies.set(SESSION_COOKIE, token, {
