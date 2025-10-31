@@ -6,6 +6,7 @@ interface BluetoothDevice {
 }
 interface BluetoothGATTServer {
   connect(): Promise<BluetoothGATTServer>;
+  getPrimaryService(uuid: any): Promise<BluetoothRemoteGATTService>;
   getPrimaryServices(): Promise<BluetoothRemoteGATTService[]>;
 }
 interface BluetoothRemoteGATTService {
@@ -18,21 +19,29 @@ interface BluetoothRemoteGATTCharacteristic {
   writeValueWithoutResponse?(data: BufferSource): Promise<void>;
 }
 
+// Layanan BLE umum untuk printer thermal (vendor transparan UART, NUS, FFE0/FFE1)
+const COMMON_BLE_PRINTER_SERVICES: string[] = [
+  "battery_service",
+  "device_information",
+  // Vendor-specific UUIDs umum pada printer BLE murah
+  "0000ffe0-0000-1000-8000-00805f9b34fb",
+  "0000ffe1-0000-1000-8000-00805f9b34fb",
+  "0000ffe5-0000-1000-8000-00805f9b34fb",
+  "000018f0-0000-1000-8000-00805f9b34fb",
+  "0000fff0-0000-1000-8000-00805f9b34fb",
+  "0000fff1-0000-1000-8000-00805f9b34fb",
+  // Nordic UART Service
+  "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+  // ISSC Transparent UART (yang Anda temukan: 49535343-fe7d-...)
+  "49535343-fe7d-4ae5-8fa9-9fafd205e455",
+  // Varian lain (AE00/AE10)
+  "0000ae00-0000-1000-8000-00805f9b34fb",
+  "0000ae10-0000-1000-8000-00805f9b34fb",
+];
+
 export async function connectAndPrint(text: string) {
   const n = navigator as Navigator & { bluetooth?: WebBluetooth };
   if (!n.bluetooth) throw new Error("Web Bluetooth tidak didukung");
-  const COMMON_BLE_PRINTER_SERVICES = [
-    "battery_service",
-    "device_information",
-    // Vendor-specific UUIDs yang umum pada printer BLE murah
-    "0000ffe0-0000-1000-8000-00805f9b34fb",
-    "0000ffe1-0000-1000-8000-00805f9b34fb",
-    "0000ffe5-0000-1000-8000-00805f9b34fb",
-    "000018f0-0000-1000-8000-00805f9b34fb",
-    // Tambahan umum untuk UART transparan
-    "0000fff0-0000-1000-8000-00805f9b34fb",
-    "0000fff1-0000-1000-8000-00805f9b34fb",
-  ];
   const device = await n.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: COMMON_BLE_PRINTER_SERVICES });
   const server = await device.gatt!.connect();
   let services: BluetoothRemoteGATTService[] = [];
@@ -45,28 +54,45 @@ export async function connectAndPrint(text: string) {
     }
     throw e;
   }
-  // Cari characteristic writable pertama
+  // Fallback: jika enumerasi layanan kosong, coba ambil layanan berdasarkan UUID yang umum
+  if (!services || services.length === 0) {
+    const tmp: BluetoothRemoteGATTService[] = [];
+    for (const id of COMMON_BLE_PRINTER_SERVICES) {
+      try {
+        const s = await server.getPrimaryService(id as any);
+        if (s) tmp.push(s);
+      } catch {}
+    }
+    services = tmp;
+  }
+  // Kumpulkan kandidat characteristic lalu prioritaskan yang paling kompatibel
+  type Cand = { ch: BluetoothRemoteGATTCharacteristic; uuid: string; score: number };
+  const candidates: Cand[] = [];
   for (const svc of services) {
     const chars = await svc.getCharacteristics();
     for (const ch of chars) {
-      try {
-        const props = ch.properties;
-        if (props.write || props.writeWithoutResponse) {
-          const encoder = new TextEncoder();
-          const init = new Uint8Array([0x1B, 0x40]); // ESC @ init
-          // tulis init dengan metode yang didukung
-          if (props.writeWithoutResponse && typeof ch.writeValueWithoutResponse === "function") await ch.writeValueWithoutResponse(init);
-          else await ch.writeValue(init);
-
-          const payload = encoder.encode(text + "\n\n");
-          // Gunakan write tanpa response jika tersedia untuk kompatibilitas
-          if (props.writeWithoutResponse && typeof ch.writeValueWithoutResponse === "function") await ch.writeValueWithoutResponse(payload);
-          else await ch.writeValue(payload);
-          return;
-        }
-      } catch {
-        // lanjutkan jika characteristic gagal ditulis
-      }
+      const props = ch.properties;
+      const uuid = (ch as any).uuid?.toLowerCase?.() || "";
+      const canWrite = props.write || props.writeWithoutResponse;
+      if (!canWrite) continue;
+      let score = props.writeWithoutResponse ? 10 : 5;
+      if (uuid.includes("6daa")) score += 5; // ISSC TX
+      if (uuid.includes("8841")) score += 3;
+      if (uuid.includes("aca3")) score += 2;
+      candidates.push({ ch, uuid, score });
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  for (const cand of candidates) {
+    try {
+      const enc = new TextEncoder();
+      const init = new Uint8Array([0x1B, 0x40]); // ESC @ init
+      await writeChunks(cand.ch, init);
+      const payload = enc.encode(text + "\n\n");
+      await writeChunks(cand.ch, payload);
+      return;
+    } catch {
+      // coba kandidat berikutnya
     }
   }
   throw new Error("Tidak menemukan characteristic BLE yang dapat ditulis untuk printer");
@@ -76,17 +102,6 @@ export async function connectAndPrint(text: string) {
 async function findWritableCharacteristic(): Promise<BluetoothRemoteGATTCharacteristic> {
   const n = navigator as Navigator & { bluetooth?: WebBluetooth };
   if (!n.bluetooth) throw new Error("Web Bluetooth tidak didukung");
-  const COMMON_BLE_PRINTER_SERVICES = [
-    "battery_service",
-    "device_information",
-    // Vendor-specific UUIDs yang umum pada printer BLE murah
-    "0000ffe0-0000-1000-8000-00805f9b34fb",
-    "0000ffe1-0000-1000-8000-00805f9b34fb",
-    "0000ffe5-0000-1000-8000-00805f9b34fb",
-    "000018f0-0000-1000-8000-00805f9b34fb",
-    "0000fff0-0000-1000-8000-00805f9b34fb",
-    "0000fff1-0000-1000-8000-00805f9b34fb",
-  ];
   const device = await n.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: COMMON_BLE_PRINTER_SERVICES });
   const server = await device.gatt!.connect();
   let services: BluetoothRemoteGATTService[] = [];
@@ -99,16 +114,36 @@ async function findWritableCharacteristic(): Promise<BluetoothRemoteGATTCharacte
     }
     throw e;
   }
+  // Fallback: ambil layanan secara langsung bila enumerasi kosong
+  if (!services || services.length === 0) {
+    const tmp: BluetoothRemoteGATTService[] = [];
+    for (const id of COMMON_BLE_PRINTER_SERVICES) {
+      try {
+        const s = await server.getPrimaryService(id as any);
+        if (s) tmp.push(s);
+      } catch {}
+    }
+    services = tmp;
+  }
+  type Cand = { ch: BluetoothRemoteGATTCharacteristic; uuid: string; score: number };
+  const candidates: Cand[] = [];
   for (const svc of services) {
     const chars = await svc.getCharacteristics();
     for (const ch of chars) {
       const props = ch.properties;
-      if (props.write || props.writeWithoutResponse) {
-        return ch;
-      }
+      const uuid = (ch as any).uuid?.toLowerCase?.() || "";
+      const canWrite = props.write || props.writeWithoutResponse;
+      if (!canWrite) continue;
+      let score = props.writeWithoutResponse ? 10 : 5;
+      if (uuid.includes("6daa")) score += 5;
+      if (uuid.includes("8841")) score += 3;
+      if (uuid.includes("aca3")) score += 2;
+      candidates.push({ ch, uuid, score });
     }
   }
-  throw new Error("Tidak menemukan characteristic BLE yang dapat ditulis untuk printer");
+  if (candidates.length === 0) throw new Error("Tidak menemukan characteristic BLE yang dapat ditulis untuk printer");
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].ch;
 }
 
 // Helper: tulis data besar dalam beberapa chunk agar aman untuk BLE
