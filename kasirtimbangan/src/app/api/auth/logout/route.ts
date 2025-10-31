@@ -30,7 +30,9 @@ export async function POST(req: NextRequest) {
   // Deteksi HTTPS untuk konsistensi flag secure
   const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || "";
   const forwardedSsl = req.headers.get("x-forwarded-ssl") || "";
-  const isHttps = forwardedProto === "https" || forwardedSsl === "on" || req.nextUrl.protocol === "https:";
+  // Gunakan WHATWG URL API yang lebih aman daripada req.nextUrl.protocol
+  const url = new URL(req.url);
+  const isHttps = forwardedProto === "https" || forwardedSsl === "on" || url.protocol === "https:";
 
   const res = NextResponse.json({ ok: true }, { status: 200 });
   await clearAllCookies(res, isHttps);
@@ -42,7 +44,9 @@ export async function GET(req: NextRequest) {
   // Force redirect ke domain yang dikonfigurasi via env jika tersedia
   const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || "";
   const forwardedSsl = req.headers.get("x-forwarded-ssl") || "";
-  const isHttps = forwardedProto === "https" || forwardedSsl === "on" || req.nextUrl.protocol === "https:";
+  // Gunakan WHATWG URL API yang lebih aman daripada req.nextUrl.protocol
+  const url = new URL(req.url);
+  const isHttps = forwardedProto === "https" || forwardedSsl === "on" || url.protocol === "https:";
 
   const rawEnvOrigin = (process.env.APP_PUBLIC_ORIGIN || process.env.NEXT_PUBLIC_APP_ORIGIN || process.env.APP_BASE_DOMAIN || process.env.NEXT_PUBLIC_BASE_DOMAIN || "").trim();
   let origin = rawEnvOrigin;
