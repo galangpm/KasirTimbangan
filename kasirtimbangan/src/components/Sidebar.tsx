@@ -13,6 +13,7 @@ const BASE_ITEMS: MenuItem[] = [
   { href: "/uploads", label: "Upload Gambar" },
   { href: "/analytics", label: "Analitik" },
   { href: "/settings", label: "Pengaturan" },
+  { href: "/debug/printer-bluetooth", label: "Debug Printer Bluetooth" },
 ];
 
 function isActive(pathname: string, href: string) {
@@ -27,12 +28,14 @@ export default function Sidebar() {
   const hideSidebar = pathname.startsWith("/login") || pathname.startsWith("/install");
   const [role, setRole] = useState<"superadmin" | "kasir" | null>(null);
   const [username, setUsername] = useState<string | null>(null);
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const items = useMemo<MenuItem[]>(() => {
     if (role === "superadmin") return [...BASE_ITEMS, { href: "/logs", label: "Log Aktivitas" }, { href: "/users", label: "Manajemen User" }];
     if (role === "kasir") return [
       { href: "/", label: "Kasir" },
       { href: "/kasir/invoices", label: "Invoice Saya" },
       { href: "/uploads", label: "Upload Gambar" },
+      { href: "/debug/printer-bluetooth", label: "Debug Printer Bluetooth" },
     ];
     return [{ href: "/login", label: "Login" }];
   }, [role]);
@@ -50,6 +53,12 @@ export default function Sidebar() {
           setRole(null);
           setUsername(null);
         }
+        try {
+          const sres = await fetch("/api/settings");
+          const sdata = await sres.json();
+          const s = sdata?.settings;
+          if (s && s.logoUrl) setLogoUrl(String(s.logoUrl));
+        } catch {}
       } catch {}
     };
     load();
@@ -86,10 +95,10 @@ export default function Sidebar() {
       </nav>
 
       {/* Desktop sidebar */}
-  <aside className="hidden md:flex md:flex-col md:w-64 border-r bg-white min-h-screen sticky top-0 neo-card">
+  <aside className="hidden md:flex md:flex-col md:w-64 border-r bg-white h-[100dvh] md:h-screen sticky top-0 overflow-hidden neo-card">
     <div className="px-4 py-4 border-b">
       <div className="flex items-center justify-between">
-        <img src="/logo.png" alt="Kasir Timbangan" className="w-full h-auto" />
+        <img src={(logoUrl || "/logo.png") as string} alt="Kasir Timbangan" className="w-full h-auto" />
       </div>
       {role && (
         <div className="text-xs text-slate-500 mt-1">Masuk sebagai {username} ({role})</div>
