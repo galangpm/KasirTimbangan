@@ -18,8 +18,19 @@ async function migrateSettingsSchema(conn: PoolConnection) {
     address VARCHAR(512) NOT NULL,
     phone VARCHAR(64) NOT NULL,
     receipt_footer VARCHAR(512) NOT NULL,
+    logo_url VARCHAR(512) NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   ) ENGINE=InnoDB`);
+  // Tambah kolom logo_url jika belum ada (untuk lingkungan yang sudah terpasang sebelumnya)
+  try {
+    const [cols] = await conn.query<RowDataPacket[]>(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'business_settings' AND COLUMN_NAME = 'logo_url'`
+    );
+    if (!Array.isArray(cols) || cols.length === 0) {
+      await conn.query(`ALTER TABLE business_settings ADD COLUMN logo_url VARCHAR(512) NULL`);
+    }
+  } catch {}
 }
 
 // Guard: hanya superadmin yang boleh mengubah pengaturan
@@ -43,7 +54,7 @@ export async function GET() {
     try {
       await migrateSettingsSchema(conn);
       const [rows] = await conn.query<RowDataPacket[]>(
-        `SELECT id, name, address, phone, receipt_footer, updated_at 
+        `SELECT id, name, address, phone, receipt_footer, logo_url, updated_at 
          FROM business_settings 
          ORDER BY updated_at DESC 
          LIMIT 1`
@@ -59,6 +70,7 @@ export async function GET() {
         address: String(row.address || ""),
         phone: String(row.phone || ""),
         receiptFooter: String(row.receipt_footer || ""),
+        logoUrl: row.logo_url ? String(row.logo_url) : null,
         updatedAt: row.updated_at,
       };
       return NextResponse.json({ ok: true, settings }, { status: 200 });
@@ -80,7 +92,7 @@ export async function PUT(req: NextRequest) {
   if (!guard.ok) return guard.res;
   try {
     const body = await req.json();
-    const { name, address, phone, receiptFooter } = body || {};
+    const { name, address, phone, receiptFooter, logoUrl } = body || {};
     // Validasi sederhana
     const errors: string[] = [];
     if (!name || typeof name !== "string" || name.trim().length < 2) errors.push("Nama usaha wajib diisi (min 2 karakter)");
@@ -107,11 +119,22 @@ export async function PUT(req: NextRequest) {
       await conn.beginTransaction();
       await migrateSettingsSchema(conn);
 
+      // Ambil logo_url sebelumnya jika tidak dikirim oleh klien
+      let currentLogo: string | null = null;
+      try {
+        const [cur] = await conn.query<RowDataPacket[]>(
+          `SELECT logo_url FROM business_settings ORDER BY updated_at DESC LIMIT 1`
+        );
+        if (Array.isArray(cur) && cur[0]?.logo_url) currentLogo = String(cur[0].logo_url);
+      } catch {}
+
+      const finalLogo = typeof logoUrl === "string" && logoUrl.trim() ? logoUrl.trim() : currentLogo;
+
       // Sederhana: pastikan hanya satu baris dengan cara kosongkan lalu insert baru
       await conn.query(`DELETE FROM business_settings`);
       await conn.query(
-        `INSERT INTO business_settings (id, name, address, phone, receipt_footer) VALUES (UUID(), ?, ?, ?, ?)`,
-        [name.trim(), address.trim(), phone.trim(), receiptFooter.trim()]
+        `INSERT INTO business_settings (id, name, address, phone, receipt_footer, logo_url) VALUES (UUID(), ?, ?, ?, ?, ?)` ,
+        [name.trim(), address.trim(), phone.trim(), receiptFooter.trim(), finalLogo]
       );
 
       await conn.commit();
