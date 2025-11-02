@@ -3,9 +3,7 @@ import { getPool } from "@/utils/db";
 import type { RowDataPacket } from "mysql2/promise";
 import { cookies } from "next/headers";
 import { SESSION_COOKIE, verifySessionToken } from "@/utils/auth";
-import { ensureUploadWorkerStarted } from "@/utils/uploadWorker";
-
-ensureUploadWorkerStarted();
+// Mode manual: tidak memulai worker otomatis di endpoint ini
 
 export async function GET(request: Request) {
   // Hanya akses untuk user yang login (superadmin/kasir)
@@ -29,7 +27,7 @@ export async function GET(request: Request) {
     params.push(status);
   }
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT id, invoice_id, invoice_item_id, item_index, kind, status, progress, filename, attempts, last_error, created_at, updated_at
+    `SELECT id, invoice_id, invoice_item_id, item_index, kind, status, progress, filename, attempts, last_error, created_at, updated_at, data_url
      FROM uploads ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
     [...params, limit, offset]
   );

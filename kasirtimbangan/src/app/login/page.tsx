@@ -15,9 +15,12 @@ export default function LoginPage() {
         const res = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
         const data = await res.json();
         if (data?.user) {
-          // Sudah login: arahkan sesuai role
-          if (data.user.role === "superadmin") window.location.assign("/analytics");
-          else window.location.assign("/");
+          // Sudah login: arahkan ke /settings untuk superadmin, kasir ke beranda
+          if (String(data.user.role || "") === "superadmin") {
+            window.location.assign("/settings");
+          } else {
+            window.location.assign("/");
+          }
         }
       } catch {}
     };
@@ -37,9 +40,17 @@ export default function LoginPage() {
       const data = await res.json();
       if (!res.ok || !data?.ok) throw new Error(data?.error || "Gagal login");
       const role = String(data.user?.role || "");
-      // Gunakan reload penuh agar cookie sesi dipastikan aktif pada halaman berikutnya
-      if (role === "superadmin") window.location.assign("/analytics");
-      else window.location.assign("/");
+      // Tunggu proses pasca-login: pastikan sesi aktif dan schema/settings siap
+      try {
+        await fetch("/api/auth/me", { cache: "no-store", credentials: "include" }).then((r) => r.json()).catch(() => ({}));
+        await fetch("/api/settings", { cache: "no-store", credentials: "include" }).catch(() => {});
+      } catch {}
+      // Redirect akhir
+      if (role === "superadmin") {
+        window.location.assign("/settings");
+      } else {
+        window.location.assign("/");
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       useFlashStore.getState().show("error", message);

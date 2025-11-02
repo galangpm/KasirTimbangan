@@ -163,3 +163,32 @@ export async function enqueueUploadJob(params: {
     [invoiceId, invoiceItemId, itemIndex, kind, dataUrl]
   );
 }
+
+// Jalankan satu batch proses upload secara manual tanpa interval background
+export async function processQueuedBatch(limit: number = BATCH_LIMIT): Promise<{ processed: number }>
+{
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    const max = Math.max(1, Number(limit) || BATCH_LIMIT);
+    const [rows] = await conn.query<RowDataPacket[]>(
+      `SELECT id FROM uploads WHERE status = 'queued' ORDER BY created_at ASC LIMIT ?`,
+      [max]
+    );
+    const ids = (rows as IdRow[]).map((r) => Number(r.id)).filter((n) => Number.isFinite(n));
+    for (const id of ids) {
+      await conn.query(
+        `UPDATE uploads SET status='uploading', attempts=attempts+1, progress=0 WHERE id=? AND status='queued'`,
+        [id]
+      );
+    }
+    conn.release();
+    for (const id of ids) {
+      await processJob(id);
+    }
+    return { processed: ids.length };
+  } catch (e) {
+    try { conn.release(); } catch {}
+    throw e;
+  }
+}

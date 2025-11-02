@@ -119,7 +119,7 @@ export default function KasirInvoicesPage() {
               rows.map((r) => (
                 <tr key={r.id} className="border-t">
                   <td className="px-4 py-3 font-mono">{r.id}</td>
-                  <td className="px-4 py-3">{new Date(r.created_at).toLocaleString("id-ID")}</td>
+                  <td className="px-4 py-3">{new Date(r.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</td>
                   <td className="px-4 py-3 font-semibold">Rp {Number(r.grand_total || 0).toLocaleString("id-ID")}</td>
                   <td className="px-4 py-3 text-right">
                     <button className="neo-button small" onClick={() => openDetail(r.id)}>Lihat Detail</button>
@@ -155,7 +155,7 @@ export default function KasirInvoicesPage() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
                     <div className="text-sm"><span className="text-slate-500">Nomor:</span> <span className="font-mono">{detail.invoice.id}</span></div>
-                    <div className="text-sm"><span className="text-slate-500">Tanggal:</span> {new Date(detail.invoice.created_at).toLocaleString("id-ID")}</div>
+                    <div className="text-sm"><span className="text-slate-500">Tanggal:</span> {new Date(detail.invoice.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</div>
                     <div className="text-sm"><span className="text-slate-500">Pembayaran:</span> {detail.invoice.payment_method || "-"}</div>
                   </div>
                   <div>

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
+import { printReceiptWithBluetooth, hasPrinterCache } from "@/utils/bluetoothPrint";
 import PaymentModal from "@/components/PaymentModal";
 import { buildReceipt58 } from "@/utils/receipt";
 import QRCode from "qrcode";
@@ -22,6 +23,7 @@ interface InvoiceItemRow {
   weight_kg: number;
   price_per_kg: number;
   total_price: number;
+  quantity?: number;
   image_data_url: string | null; // crop/thumbnail
   full_image_data_url: string | null; // full image
 }
@@ -33,6 +35,7 @@ export default function InvoiceDetailPage() {
   const id = String(params?.id || "");
   const search = useSearchParams();
   const printMode = search.get("print") === "1";
+  const payMode = search.get("pay") === "1";
   const [authChecked, setAuthChecked] = useState(false);
   const [cashierName, setCashierName] = useState<string>("");
   const [data, setData] = useState<InvoiceDetail | null>(null);
@@ -53,6 +56,7 @@ export default function InvoiceDetailPage() {
         weight_kg: Number(it.weight_kg || 0),
         price_per_kg: Number(it.price_per_kg || 0),
         total_price: Number(it.total_price || 0),
+        quantity: Number((it as any)?.quantity || 1),
         image_data_url: (it as Partial<InvoiceItemRow>).image_data_url ?? null,
         full_image_data_url: (it as Partial<InvoiceItemRow>).full_image_data_url ?? null,
       }));
@@ -98,6 +102,13 @@ export default function InvoiceDetailPage() {
   useEffect(() => { fetchDetail(); }, [fetchDetail]);
   useEffect(() => { fetchSettings(); }, [fetchSettings]);
 
+  // Auto-buka modal pembayaran jika diminta via query param
+  useEffect(() => {
+    if (payMode) {
+      setOpenPay(true);
+    }
+  }, [payMode]);
+
   // Access protection: superadmin only
   useEffect(() => {
     const check = async () => {
@@ -133,6 +144,12 @@ export default function InvoiceDetailPage() {
     }
   }, [data?.invoice?.id]);
 
+  // Hitung total berat untuk ringkasan
+  const totalWeight = useMemo(() => {
+    const items = data?.items || [];
+    return items.reduce((acc, it) => acc + Number(it.weight_kg || 0), 0);
+  }, [data?.items]);
+
   const receiptText = useMemo(() => {
     if (!data) return "";
     const simple = {
@@ -140,12 +157,14 @@ export default function InvoiceDetailPage() {
       items: data.items.map((it) => ({
         id: it.id,
         fruit: it.fruit,
+        quantity: Number((it as any).quantity || 1),
         weight_kg: it.weight_kg,
         price_per_kg: it.price_per_kg,
         total_price: it.total_price,
       })),
     };
-    return buildReceipt58(simple, settings, cashierName, String(data.invoice?.customer_name || ""));
+    // Preview tanpa ESC/POS agar tetap bersih
+    return buildReceipt58(simple, settings, cashierName, String(data.invoice?.customer_name || ""), { escPosFormatting: false });
   }, [data, settings, cashierName]);
 
   if (!authChecked) return <div className="neo-card p-4">Memeriksa akses...</div>;
@@ -157,6 +176,54 @@ export default function InvoiceDetailPage() {
           <h2 className="text-lg font-semibold">Detail Nota</h2>
           <div className="flex gap-2">
             <button className="neo-button small" onClick={() => setOpenPay(true)}>Pembayaran</button>
+            <button className="neo-button small" onClick={() => router.push("/")}>Kembali</button>
+            <button
+              className={`neo-button secondary small ${!data?.invoice?.payment_method ? "opacity-50 cursor-not-allowed" : ""}`}
+              disabled={!data?.invoice?.payment_method}
+              aria-disabled={!data?.invoice?.payment_method}
+              title={!data?.invoice?.payment_method ? "Pilih metode pembayaran terlebih dahulu" : "Cetak Nota"}
+              onClick={async () => {
+                try {
+                  if (!data?.invoice?.payment_method) {
+                    useFlashStore.getState().show("warning", "Pilih metode pembayaran terlebih dahulu");
+                    return;
+                  }
+                  if (!data?.invoice?.id) throw new Error("ID nota tidak tersedia");
+                  const idToPrint = data.invoice.id;
+                  // Bangun teks cetak dengan ESC/POS untuk nama usaha
+                  const simple = {
+                    invoice: data.invoice,
+                    items: data.items.map((it) => ({
+                      id: it.id,
+                      fruit: it.fruit,
+                      quantity: Number((it as any).quantity || 1),
+                      weight_kg: it.weight_kg,
+                      price_per_kg: it.price_per_kg,
+                      total_price: it.total_price,
+                    })),
+                  };
+                  const textToPrint = buildReceipt58(simple, settings, cashierName, String(data.invoice?.customer_name || ""), { escPosFormatting: true });
+                  await printReceiptWithBluetooth(textToPrint, idToPrint);
+                  useFlashStore.getState().show("success", "Cetak dikirim ke printer");
+                } catch (e: unknown) {
+                  useFlashStore.getState().show("error", getErrorMessage(e));
+                }
+              }}
+            >Cetak Nota</button>
+            <button className="neo-button primary small" onClick={async () => {
+              try {
+                const res = await fetch("/api/uploads/sync", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ limit: 10 })
+                });
+                const json = await res.json();
+                if (!res.ok || json?.ok === false) throw new Error(json?.error || "Gagal sinkronisasi upload");
+                useFlashStore.getState().show("success", `Memproses ${json.processed || 0} upload`);
+              } catch (e: unknown) {
+                useFlashStore.getState().show("error", getErrorMessage(e));
+              }
+            }}>Sync Upload</button>
           </div>
         </div>
         {loading ? (
@@ -165,8 +232,9 @@ export default function InvoiceDetailPage() {
           <div className="mt-3 space-y-2">
             <div className="text-sm">
               <div><span className="font-mono text-xs">ID:</span> {data.invoice.id}</div>
-              <div>Tanggal: <span suppressHydrationWarning>{new Date(data.invoice.created_at).toLocaleString("id-ID")}</span></div>
+              <div>Tanggal: <span suppressHydrationWarning>{new Date(data.invoice.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</span></div>
               <div>Metode: {data.invoice.payment_method ?? "-"}</div>
+              <div>Total Berat: <span suppressHydrationWarning>{Number(totalWeight).toLocaleString("id-ID", { minimumFractionDigits: 3 })}</span> kg</div>
               {data.invoice.notes ? (<div>Catatan: {data.invoice.notes}</div>) : null}
               <div>
                 Status: {" "}
@@ -184,6 +252,7 @@ export default function InvoiceDetailPage() {
                 <thead>
                   <tr className="text-left">
                     <th className="px-3 py-2">Buah</th>
+                    <th className="px-3 py-2">Qty</th>
                     <th className="px-3 py-2">Berat (kg)</th>
                     <th className="px-3 py-2">Harga/kg</th>
                     <th className="px-3 py-2">Total</th>
@@ -193,10 +262,11 @@ export default function InvoiceDetailPage() {
                 </thead>
                 <tbody>
                   {data.items.length === 0 ? (
-                    <tr><td className="px-3 py-2" colSpan={6}>Tidak ada item</td></tr>
+                    <tr><td className="px-3 py-2" colSpan={7}>Tidak ada item</td></tr>
                   ) : data.items.map((it) => (
                     <tr key={it.id} className="border-t">
                       <td className="px-3 py-2">{it.fruit}</td>
+                      <td className="px-3 py-2">{Number((it as any).quantity || 1)}</td>
                       <td className="px-3 py-2"><span suppressHydrationWarning>{Number(it.weight_kg).toLocaleString("id-ID", { minimumFractionDigits: 3 })}</span></td>
                       <td className="px-3 py-2">Rp <span suppressHydrationWarning>{Number(it.price_per_kg).toLocaleString("id-ID")}</span></td>
                       <td className="px-3 py-2 font-bold">Rp <span suppressHydrationWarning>{Number(it.total_price).toLocaleString("id-ID")}</span></td>
@@ -265,7 +335,33 @@ export default function InvoiceDetailPage() {
               if (!res.ok) throw new Error(json?.error || "Gagal memperbarui pembayaran");
               setData((prev) => prev ? { invoice: { ...prev.invoice, payment_method: m, notes: notes ?? prev.invoice.notes ?? null }, items: prev.items } : prev);
               setOpenPay(false);
-              useFlashStore.getState().show("success", "Status pembayaran diperbarui");
+              // Setelah memilih pembayaran, lakukan cetak otomatis hanya jika printer sudah tersambung (cache ada)
+              const simple = data ? {
+                invoice: { ...data.invoice, payment_method: m, notes: notes ?? data.invoice.notes ?? null },
+                items: data.items.map((it) => ({
+                  id: it.id,
+                  fruit: it.fruit,
+                  quantity: Number((it as any).quantity || 1),
+                  weight_kg: it.weight_kg,
+                  price_per_kg: it.price_per_kg,
+                  total_price: it.total_price,
+                })),
+              } : undefined;
+              const textToPrint = simple ? buildReceipt58(simple, settings, cashierName, String(simple.invoice?.customer_name || ""), { escPosFormatting: true }) : receiptText;
+              if (hasPrinterCache()) {
+                try {
+                  await printReceiptWithBluetooth(textToPrint, id);
+                  useFlashStore.getState().show("success", "Status pembayaran diperbarui & cetak dikirim");
+                } catch (e: unknown) {
+                  useFlashStore.getState().show("warning", `Pembayaran diperbarui, namun cetak gagal: ${getErrorMessage(e)}`);
+                }
+              } else {
+                // Tidak ada cache: minta user sekali untuk menyambungkan printer lewat tombol Cetak Nota
+                useFlashStore.getState().show(
+                  "info",
+                  "Pembayaran diperbarui. Hubungkan printer dengan klik 'Cetak Nota' sekali, lalu transaksi berikutnya akan cetak otomatis."
+                );
+              }
             } catch (e: unknown) {
               useFlashStore.getState().show("error", getErrorMessage(e));
             }

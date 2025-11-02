@@ -18,6 +18,7 @@ interface InvoiceListRow {
   payment_method: string | null;
   items_count: number;
   grand_total: number;
+  total_weight: number;
 }
 
 interface InvoiceHeader {
@@ -72,6 +73,12 @@ export default function InvoicesPage() {
   const [cashierName, setCashierName] = useState<string>("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const selectedCount = selected.size;
+  const [status, setStatus] = useState<"all" | "paid" | "pending">("all");
+  // Modal hapus dengan captcha 3 digit
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleteCaptcha, setDeleteCaptcha] = useState<string>("");
+  const [deleteCaptchaInput, setDeleteCaptchaInput] = useState<string>("");
+  const generateCaptcha3 = () => String(Math.floor(100 + Math.random() * 900));
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -80,8 +87,9 @@ export default function InvoicesPage() {
     if (dateFrom) params.set("dateFrom", dateFrom);
     if (dateTo) params.set("dateTo", dateTo);
     if (q) params.set("q", q);
+    if (status !== "all") params.set("status", status);
     return params.toString();
-  }, [page, pageSize, dateFrom, dateTo, q]);
+  }, [page, pageSize, dateFrom, dateTo, q, status]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -155,14 +163,43 @@ export default function InvoicesPage() {
   };
   
 
-  const exportCsv = () => {
-    const headers = ["Invoice ID","Tanggal","Metode","Status","Jumlah Item","Total"];
-    const rowsCsv = rows.map((r) => [
+  const fetchAllForExport = useCallback(async () => {
+    const all: InvoiceListRow[] = [];
+    try {
+      let p = 1;
+      const ps = 100;
+      let totalPagesLocal = 1;
+      const base = new URLSearchParams();
+      base.set("pageSize", String(ps));
+      if (dateFrom) base.set("dateFrom", dateFrom);
+      if (dateTo) base.set("dateTo", dateTo);
+      if (q) base.set("q", q);
+      if (status !== "all") base.set("status", status);
+      do {
+        base.set("page", String(p));
+        const res = await fetch(`/api/invoices?${base.toString()}`);
+        const data: { data?: InvoiceListRow[]; page?: number; pageSize?: number; totalPages?: number; error?: string } = await res.json();
+        if (!res.ok) throw new Error(data?.error || "Gagal memuat data untuk ekspor");
+        (data.data || []).forEach((r) => all.push(r));
+        totalPagesLocal = Number(data.totalPages || 1);
+        p += 1;
+      } while (p <= totalPagesLocal);
+    } catch (e) {
+      useFlashStore.getState().show("error", getErrorMessage(e));
+    }
+    return all;
+  }, [dateFrom, dateTo, q, status]);
+
+  const exportCsv = async () => {
+    const dataRows = await fetchAllForExport();
+    const headers = ["Invoice ID","Tanggal","Metode","Status","Jumlah Item","Total Berat (kg)","Total"];
+    const rowsCsv = dataRows.map((r) => [
       r.id,
-      new Date(r.created_at).toLocaleString("id-ID"),
+      new Date(r.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" }),
       r.payment_method ?? "-",
       r.payment_method ? "dibayar" : "pending",
       String(r.items_count ?? 0),
+      String(Number(r.total_weight || 0).toFixed(3)),
       String(Number(r.grand_total || 0)),
     ]);
     const csv = [headers.join(","), ...rowsCsv.map((arr) => arr.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))].join("\n");
@@ -177,15 +214,17 @@ export default function InvoicesPage() {
 
   const exportExcel = async () => {
     const XLSX = await import("xlsx");
-    const headers = ["Invoice ID","Tanggal","Metode","Status","Jumlah Item","Total"];
+    const dataRows = await fetchAllForExport();
+    const headers = ["Invoice ID","Tanggal","Metode","Status","Jumlah Item","Total Berat (kg)","Total"];
     const dataAoA = [
       headers,
-      ...rows.map((r) => [
+      ...dataRows.map((r) => [
         r.id,
-        new Date(r.created_at).toLocaleString("id-ID"),
+        new Date(r.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" }),
         r.payment_method ?? "-",
         r.payment_method ? "dibayar" : "pending",
         Number(r.items_count ?? 0),
+        Number(r.total_weight || 0),
         Number(r.grand_total || 0),
       ]),
     ];
@@ -238,6 +277,7 @@ export default function InvoicesPage() {
           items: (cached.items || []).map((it) => ({
             id: String(it.id || ""),
             fruit: String(it.fruit || ""),
+            quantity: Number((it as any).quantity || 1),
             weight_kg: Number(it.weight_kg || 0),
             price_per_kg: Number(it.price_per_kg || 0),
             total_price: Number(it.total_price || 0),
@@ -258,6 +298,7 @@ export default function InvoicesPage() {
         items: (data.items || []).map((it) => ({
           id: String(it.id || ""),
           fruit: String(it.fruit || ""),
+          quantity: Number((it as any).quantity || 1),
           weight_kg: Number(it.weight_kg || 0),
           price_per_kg: Number(it.price_per_kg || 0),
           total_price: Number(it.total_price || 0),
@@ -366,7 +407,6 @@ export default function InvoicesPage() {
   };
   const deleteSelectedInvoices = async () => {
     if (selected.size === 0) return;
-    if (!confirm(`Hapus ${selected.size} nota terpilih? Tindakan ini tidak dapat dibatalkan.`)) return;
     try {
       const ids = Array.from(selected);
       const results = await Promise.allSettled(
@@ -392,10 +432,30 @@ export default function InvoicesPage() {
     }
   };
 
+  const openDeleteSelectedModal = () => {
+    if (selected.size === 0) {
+      useFlashStore.getState().show("info", "Pilih nota untuk dihapus");
+      return;
+    }
+    setDeleteCaptcha(generateCaptcha3());
+    setDeleteCaptchaInput("");
+    setDeleteModalOpen(true);
+  };
+
+  const confirmDeleteSelected = async () => {
+    const code = deleteCaptchaInput.trim();
+    if (code !== deleteCaptcha.trim()) {
+      useFlashStore.getState().show("warning", "Verifikasi gagal. Penghapusan dibatalkan.");
+      return;
+    }
+    setDeleteModalOpen(false);
+    await deleteSelectedInvoices();
+  };
+
   return (
     <div className="p-4 space-y-4">
       <div className="neo-card p-3">
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
           <div>
             <label className="text-sm">Dari Tanggal</label>
             <input type="date" className="mt-1 w-full neo-input" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
@@ -414,6 +474,14 @@ export default function InvoicesPage() {
               {[10,20,50,100].map((n) => (<option key={n} value={n}>{n}</option>))}
             </select>
           </div>
+          <div>
+            <label className="text-sm">Status Nota</label>
+            <select className="mt-1 w-full neo-input" value={status} onChange={(e) => setStatus(e.target.value as any)}>
+              <option value="all">Semua</option>
+              <option value="paid">Dibayar</option>
+              <option value="pending">Pending</option>
+            </select>
+          </div>
           <div className="flex items-end">
             <button
               className="w-full neo-button"
@@ -427,10 +495,36 @@ export default function InvoicesPage() {
           <button className="neo-button secondary" onClick={exportExcel}>Ekspor Excel</button>
           <button
             className="neo-button danger"
-            onClick={deleteSelectedInvoices}
+            onClick={openDeleteSelectedModal}
             disabled={selectedCount === 0}
             title={selectedCount > 0 ? `Hapus ${selectedCount} nota terpilih` : "Pilih nota untuk dihapus"}
           >Hapus Nota Terpilih{selectedCount > 0 ? ` (${selectedCount})` : ""}</button>
+        </div>
+      </div>
+
+      {/* Ringkasan Total */}
+      <div className="neo-card p-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div>
+            <div className="text-gray-600">Total Nota</div>
+            <div className="font-semibold text-lg">{total.toLocaleString("id-ID")}</div>
+          </div>
+          <div>
+            <div className="text-gray-600">Total Berat</div>
+            <div className="font-semibold text-lg text-blue-600">
+              {rows.reduce((sum, row) => sum + Number(row.total_weight || 0), 0).toLocaleString("id-ID", { minimumFractionDigits: 3 })} kg
+            </div>
+          </div>
+          <div>
+            <div className="text-gray-600">Total Pendapatan</div>
+            <div className="font-semibold text-lg text-green-600">
+              Rp {rows.reduce((sum, row) => sum + Number(row.grand_total || 0), 0).toLocaleString("id-ID")}
+            </div>
+          </div>
+          <div>
+            <div className="text-gray-600">Halaman</div>
+            <div className="font-semibold text-lg">{page} dari {totalPages}</div>
+          </div>
         </div>
       </div>
 
@@ -446,6 +540,7 @@ export default function InvoicesPage() {
                   <th className="px-3 py-2 whitespace-nowrap">Metode</th>
                   <th className="px-3 py-2 whitespace-nowrap">Status</th>
                   <th className="px-3 py-2 whitespace-nowrap">Jumlah Item</th>
+                  <th className="px-3 py-2 whitespace-nowrap">Total Berat (kg)</th>
                   <th className="px-3 py-2 whitespace-nowrap">Total</th>
                   <th className="px-3 py-2 whitespace-nowrap">Aksi</th>
                    </tr>
@@ -468,7 +563,7 @@ export default function InvoicesPage() {
                       />
                     </td>
                     <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{r.id}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString("id-ID")}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{r.payment_method ?? "-"}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       {(() => {
@@ -480,27 +575,16 @@ export default function InvoicesPage() {
                       })()}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">{r.items_count}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{Number(r.total_weight || 0).toLocaleString("id-ID", { minimumFractionDigits: 3 })}</td>
                     <td className="px-3 py-2 font-bold whitespace-nowrap">Rp {Number(r.grand_total || 0).toLocaleString("id-ID")}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                       <div className="relative">
-                         <button
-                           className="neo-button small ghost"
-                           onClick={(e) => {
-                             const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                             setMenuState((prev) => (prev && prev.id === r.id ? null : { id: r.id, rect }));
-                           }}
-                         >Aksi ▾</button>
-                         {/* remove inline absolute menu rendering */}
-                         {false && _menuOpenId === r.id && (
-                           <div className="absolute z-[9999] mt-1 right-0 min-w-[180px] bg-white border rounded shadow">
-                             <button className="block w-full text-left px-3 py-2 hover:bg-slate-100" onClick={() => { /* openDetail(menuState?.id); */ if (menuState) openPayModal(menuState.id); setMenuState(null); }}>Detail (Modal)</button>
-                             <Link href={`/invoices/${r.id}`} className="block px-3 py-2 hover:bg-slate-100">Halaman Detail</Link>
-                             <Link href={`/invoices/${r.id}?print=1`} className="block px-3 py-2 hover:bg-slate-100">Preview/Print</Link>
-                             <button className="block w-full text-left px-3 py-2 hover:bg-slate-100 text-red-600" onClick={() => deleteInvoice(r.id)}>Hapus Nota</button>
-                           </div>
-                         )}
-                       </div>
-                     </td>
+                      <Link
+                        href={`/invoices/${r.id}`}
+                        className="neo-button ghost small"
+                        aria-label="Lihat detail nota"
+                        title="Lihat detail nota"
+                      >👁️</Link>
+                    </td>
                    </tr>
                  ))}
                </tbody>
@@ -553,7 +637,7 @@ export default function InvoicesPage() {
             </div>
             <div className="text-sm mb-3">
               <div><span className="font-mono text-xs">ID:</span> {detailData.invoice.id}</div>
-              <div>Tanggal: {new Date(detailData.invoice.created_at).toLocaleString("id-ID")}</div>
+              <div>Tanggal: {new Date(detailData.invoice.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</div>
               <div>Metode: {detailData.invoice.payment_method ?? "-"}</div>
               {detailData.invoice.notes ? (
                 <div>Catatan: {detailData.invoice.notes}</div>
@@ -608,6 +692,46 @@ export default function InvoicesPage() {
         qrDataUrl={previewQrDataUrl}
         onPrint={handlePrintPreview}
       />
+      {deleteModalOpen && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="delete-selected-title" onClick={() => setDeleteModalOpen(false)}>
+          <div className="neo-card p-4 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-3">
+              <h3 id="delete-selected-title" className="text-lg font-semibold">Konfirmasi Hapus Nota Terpilih</h3>
+              <button className="neo-button ghost small" onClick={() => setDeleteModalOpen(false)}>Tutup</button>
+            </div>
+            <p className="text-sm mb-3">Anda akan menghapus {selectedCount} nota terpilih. Tindakan ini tidak dapat dibatalkan.</p>
+            <div className="mb-2">
+              <div className="text-sm mb-1">Captcha keamanan:</div>
+              <div className="flex items-center gap-2">
+                <div className="font-mono text-2xl tracking-widest bg-slate-100 px-3 py-2 rounded select-none">{deleteCaptcha}</div>
+                <button className="neo-button ghost small" onClick={() => setDeleteCaptcha(generateCaptcha3())} aria-label="Ganti kode" title="Ganti kode">🔄</button>
+              </div>
+            </div>
+            <div className="mb-3">
+              <label className="text-sm">Masukkan 3 digit di atas</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]{3}"
+                maxLength={3}
+                className="mt-1 w-full neo-input"
+                value={deleteCaptchaInput}
+                onChange={(e) => setDeleteCaptchaInput(e.target.value.replace(/[^0-9]/g, ""))}
+                placeholder="contoh: 123"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button className="neo-button ghost" onClick={() => setDeleteModalOpen(false)}>Batal</button>
+              <button
+                className="neo-button danger"
+                onClick={confirmDeleteSelected}
+                disabled={deleteCaptchaInput.trim() !== deleteCaptcha.trim() || selectedCount === 0}
+                title={selectedCount > 0 ? `Hapus ${selectedCount} nota terpilih` : "Pilih nota untuk dihapus"}
+              >Hapus{selectedCount > 0 ? ` (${selectedCount})` : ""}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

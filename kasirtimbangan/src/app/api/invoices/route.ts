@@ -5,13 +5,14 @@ import type { PoolConnection, RowDataPacket, ResultSetHeader } from "mysql2/prom
 import { SESSION_COOKIE, verifySessionToken } from "@/utils/auth";
 import { promises as fs } from "fs";
 import path from "path";
-import { enqueueUploadJob, ensureUploadWorkerStarted } from "@/utils/uploadWorker";
+import { enqueueUploadJob } from "@/utils/uploadWorker";
 
 type InvoiceItemInput = {
   fruit: string;
   weightKg: number;
   pricePerKg: number;
   totalPrice: number;
+  quantity?: number;
   imageDataUrl?: string | null;
   fullImageDataUrl?: string | null;
 };
@@ -59,7 +60,7 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
   // Pastikan tabel invoices ada dulu
   await conn.query(`CREATE TABLE IF NOT EXISTS invoices (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     payment_method VARCHAR(16) NULL
   ) ENGINE=InnoDB`);
 
@@ -71,6 +72,18 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
   const invColMap: Record<string, ColumnRow> = {};
   for (const c of invCols || []) invColMap[c.COLUMN_NAME] = c;
   const idCol = invColMap["id"];
+
+  // Migrasi created_at ke DATETIME jika masih TIMESTAMP agar nilai tersimpan persis sesuai lokal (Asia/Jakarta)
+  try {
+    const [createdColRows] = await conn.query<ColumnRow[]>(
+      `SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS 
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'created_at'`
+    );
+    const currentType = String(createdColRows?.[0]?.DATA_TYPE || "").toLowerCase();
+    if (currentType === "timestamp") {
+      await conn.query(`ALTER TABLE invoices MODIFY COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`);
+    }
+  } catch {}
 
   // Jika id bukan CHAR(36), migrasikan ke UUID
   if (!idCol || idCol.COLUMN_TYPE.toLowerCase() !== "char(36)") {
@@ -90,6 +103,7 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
       weight_kg DECIMAL(10,3) NOT NULL,
       price_per_kg INT NOT NULL,
       total_price INT NOT NULL,
+      quantity INT NOT NULL DEFAULT 1,
       image_data_url MEDIUMTEXT NULL,
       full_image_data_url MEDIUMTEXT NULL
     ) ENGINE=InnoDB`);
@@ -101,6 +115,10 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
     );
     const itmColMap: Record<string, ColumnRow> = {};
     for (const c of itmCols || []) itmColMap[c.COLUMN_NAME] = c;
+    // Tambah kolom quantity bila belum ada
+    if (!itmColMap["quantity"]) {
+      try { await conn.query(`ALTER TABLE invoice_items ADD COLUMN quantity INT NOT NULL DEFAULT 1`); } catch {}
+    }
 
     // Tambah kolom invoice_id_uuid jika belum ada
     if (!itmColMap["invoice_id_uuid"]) {
@@ -162,7 +180,7 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
   // Pastikan skema akhir sesuai (id CHAR(36) pada invoices, dan invoice_items.invoice_id CHAR(36))
   await conn.query(`CREATE TABLE IF NOT EXISTS invoices (
     id CHAR(36) PRIMARY KEY,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     payment_method VARCHAR(16) NULL,
     user_id CHAR(36) NULL,
     customer_uuid CHAR(36) NULL
@@ -174,11 +192,23 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
     weight_kg DECIMAL(10,3) NOT NULL,
     price_per_kg INT NOT NULL,
     total_price INT NOT NULL,
+    quantity INT NOT NULL DEFAULT 1,
     image_data_url MEDIUMTEXT NULL,
     full_image_data_url MEDIUMTEXT NULL,
     INDEX idx_invoice_id (invoice_id),
     CONSTRAINT fk_invoice FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
   ) ENGINE=InnoDB`);
+
+  // Pastikan kolom quantity ada meski tabel sudah terlanjur dibuat tanpa kolom tersebut
+  try {
+    const [[qtyCol]] = await conn.query<RowDataPacket[]>(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoice_items' AND COLUMN_NAME = 'quantity' LIMIT 1`
+    );
+    if (!qtyCol) {
+      await conn.query(`ALTER TABLE invoice_items ADD COLUMN quantity INT NOT NULL DEFAULT 1`);
+    }
+  } catch {}
 
   // Tabel customers dan relasi customer_uuid di invoices
   await conn.query(`CREATE TABLE IF NOT EXISTS customers (
@@ -196,6 +226,29 @@ async function migrateInvoicesSchema(conn: PoolConnection) {
   try { await conn.query(`ALTER TABLE invoices ADD CONSTRAINT fk_invoices_customer FOREIGN KEY (customer_uuid) REFERENCES customers(uuid) ON DELETE SET NULL`); } catch {}
 }
 
+// Format ke 'YYYY-MM-DD HH:mm:ss' untuk timezone tertentu (mis. Asia/Jakarta)
+function toMySqlTimestampInTimeZone(isoString: string, timeZone: string): string {
+  const d = new Date(isoString);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (type: string): string => String(parts.find(p => p.type === type)?.value || "00");
+  const y = get("year");
+  const m = get("month");
+  const day = get("day");
+  const hh = get("hour");
+  const mm = get("minute");
+  const ss = get("second");
+  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+}
+
 export async function POST(req: NextRequest) {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value || "";
@@ -208,7 +261,7 @@ export async function POST(req: NextRequest) {
   }
   try {
     const body = await req.json();
-    const { items, paymentMethod, customer } = body || {} as { items: InvoiceItemInput[]; paymentMethod?: string; customer?: CustomerInput };
+    const { items, paymentMethod, customer, clientTs } = body || {} as { items: InvoiceItemInput[]; paymentMethod?: string; customer?: CustomerInput; clientTs?: string };
     if (!Array.isArray(items) || items.length === 0) {
       return NextResponse.json({ error: "items wajib diisi" }, { status: 400 });
     }
@@ -238,6 +291,8 @@ export async function POST(req: NextRequest) {
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
+      // Pastikan sesi DB memakai Asia/Jakarta agar NOW() dan operasi waktu konsisten
+      try { await conn.query("SET time_zone = '+07:00'"); } catch {}
       await conn.beginTransaction();
 
       await migrateInvoicesSchema(conn);
@@ -287,12 +342,17 @@ export async function POST(req: NextRequest) {
       const [[uuidRow]] = await conn.query<RowDataPacket[]>("SELECT UUID() AS uuid");
       const invoiceId: string = String(uuidRow.uuid);
 
+      // Tentukan created_at berdasarkan timestamp dari klien, format ke Asia/Jakarta (GMT+7)
+      let clientIso = typeof clientTs === "string" && clientTs ? clientTs : new Date().toISOString();
+      // Jika parsing gagal, fallback ke waktu server
+      if (isNaN(Date.parse(clientIso))) clientIso = new Date().toISOString();
+      const createdAtJakartaForDb = toMySqlTimestampInTimeZone(clientIso, "Asia/Jakarta");
+
       await conn.query(
-        "INSERT INTO invoices (id, payment_method, user_id, customer_uuid) VALUES (?, ?, ?, ?)",
-        [invoiceId, paymentMethod || null, String(payload.id), customerUuid]
+        "INSERT INTO invoices (id, created_at, payment_method, user_id, customer_uuid) VALUES (?, ?, ?, ?, ?)",
+        [invoiceId, createdAtJakartaForDb, paymentMethod || null, String(payload.id), customerUuid]
       );
 
-      ensureUploadWorkerStarted();
       const savedImages: Array<{ thumbUrl: string | null; fullUrl: string | null }> = [];
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
@@ -302,30 +362,53 @@ export async function POST(req: NextRequest) {
         if (!thumbFinal && fullFinal) thumbFinal = fullFinal;
         if (!fullFinal && thumbFinal) fullFinal = thumbFinal;
         savedImages.push({ thumbUrl: thumbFinal, fullUrl: fullFinal });
+        const qty = Number(it.quantity || 1);
         const [res] = await conn.query<ResultSetHeader>(
           `INSERT INTO invoice_items (
-            invoice_id, fruit, weight_kg, price_per_kg, total_price, image_data_url, full_image_data_url
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            invoice_id, fruit, weight_kg, price_per_kg, total_price, quantity, image_data_url, full_image_data_url
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             invoiceId,
             it.fruit,
             it.weightKg,
             it.pricePerKg,
             it.totalPrice,
+            qty,
             thumbFinal,
             fullFinal,
           ]
         );
         const invoiceItemId = Number(res.insertId || 0);
 
-        // Enqueue background upload jika data berupa data URL gambar
-        if (it.imageDataUrl && isDataUrl(it.imageDataUrl)) {
-          await enqueueUploadJob({ invoiceId, invoiceItemId, itemIndex: i, kind: "thumb", dataUrl: String(it.imageDataUrl) });
-        }
-        if (it.fullImageDataUrl && isDataUrl(it.fullImageDataUrl)) {
-          await enqueueUploadJob({ invoiceId, invoiceItemId, itemIndex: i, kind: "full", dataUrl: String(it.fullImageDataUrl) });
-        }
+        // Mode manual: jangan auto-enqueue upload saat membuat invoice.
+        // Gambar disimpan apa adanya (data URL atau URL) di kolom invoice_items.
+        // Enqueue akan dilakukan via endpoint /api/uploads/sync atau tombol Sync di UI.
       }
+
+      // Validasi otomatis: bandingkan created_at tersimpan (anggap Asia/Jakarta) vs clientTs (UTC).
+      // Jika selisih > 120 detik, koreksi created_at dan tulis log.
+      try {
+        const [[createdRow]] = await conn.query<RowDataPacket[]>(
+          "SELECT created_at FROM invoices WHERE id = ? LIMIT 1",
+          [invoiceId]
+        );
+        const dbLocalStr = String(createdRow?.created_at || "");
+        const dbIsoWithTZ = dbLocalStr ? dbLocalStr.replace(" ", "T") + "+07:00" : "";
+        const dbCreated = new Date(dbIsoWithTZ);
+        const clientCreated = new Date(clientIso);
+        const diffSec = Math.abs(Math.round((dbCreated.getTime() - clientCreated.getTime()) / 1000));
+        if (Number.isFinite(diffSec) && diffSec > 120) {
+          // Koreksi ke waktu dari klien dan catat di logs
+          await conn.query("UPDATE invoices SET created_at = ? WHERE id = ?", [createdAtJakartaForDb, invoiceId]);
+          const detailsMismatch = `timestamp_mismatch diff=${diffSec}s; db_local_jkt=${dbLocalStr}; client_utc=${clientCreated.toISOString()}`;
+          try {
+            await conn.query(
+              `INSERT INTO logs (user_id, action, invoice_id, details) VALUES (?, 'timestamp_validation', ?, ?)`,
+              [String(payload.id), invoiceId, detailsMismatch]
+            );
+          } catch {}
+        }
+      } catch {}
 
       // Tulis log pembuatan invoice
       const totalGrand = items.reduce((acc, it) => acc + Number(it.totalPrice || 0), 0);
@@ -365,6 +448,7 @@ export async function GET(req: NextRequest) {
     const meta = (url.searchParams.get("meta") || "").toLowerCase(); // meta endpoint ringkas
     const range = (url.searchParams.get("range") || "").toLowerCase(); // dukungan range cepat
     const mineParam = (url.searchParams.get("mine") || "").toLowerCase() === "true"; // filter khusus milik user sendiri
+    const statusParam = (url.searchParams.get("status") || "").toLowerCase(); // filter status: paid/pending
 
     // Baca session untuk kebutuhan filter "mine"
     const cookieStore = await cookies();
@@ -374,10 +458,12 @@ export async function GET(req: NextRequest) {
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
+      // Pastikan sesi DB memakai Asia/Jakarta agar NOW() dan operasi waktu konsisten
+      try { await conn.query("SET time_zone = '+07:00'"); } catch {}
       // Hindari migrasi berat pada setiap GET; cukup pastikan tabel ada.
       await conn.query(`CREATE TABLE IF NOT EXISTS invoices (
         id CHAR(36) PRIMARY KEY,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         payment_method VARCHAR(16) NULL,
         user_id CHAR(36) NULL
       ) ENGINE=InnoDB`);
@@ -388,10 +474,22 @@ export async function GET(req: NextRequest) {
         weight_kg DECIMAL(10,3) NOT NULL,
         price_per_kg INT NOT NULL,
         total_price INT NOT NULL,
+        quantity INT NOT NULL DEFAULT 1,
         image_data_url MEDIUMTEXT NULL,
         full_image_data_url MEDIUMTEXT NULL,
         INDEX idx_invoice_id (invoice_id)
       ) ENGINE=InnoDB`);
+
+      // Pastikan kolom quantity ada (untuk DB yang sudah terbuat sebelumnya tanpa kolom quantity)
+      try {
+        const [[qtyColGet]] = await conn.query<RowDataPacket[]>(
+          `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoice_items' AND COLUMN_NAME = 'quantity' LIMIT 1`
+        );
+        if (!qtyColGet) {
+          await conn.query(`ALTER TABLE invoice_items ADD COLUMN quantity INT NOT NULL DEFAULT 1`);
+        }
+      } catch {}
 
       // Meta endpoint: fingerprint perubahan untuk 24 jam terakhir agar seeding efisien
       if (meta === "last24") {
@@ -474,6 +572,11 @@ export async function GET(req: NextRequest) {
         params.push(`%${q}%`);
         params.push(`%${q}%`);
       }
+      if (statusParam === "paid") {
+        whereParts.push("i.payment_method IS NOT NULL");
+      } else if (statusParam === "pending") {
+        whereParts.push("i.payment_method IS NULL");
+      }
       if (mineParam) {
         if (!payload) { conn.release(); return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 }); }
         whereParts.push("i.user_id = ?");
@@ -500,10 +603,15 @@ export async function GET(req: NextRequest) {
       if (params.length) { rowsRes = await conn.query(sql, params); } else { rowsRes = await conn.query(sql); }
       const [rows] = rowsRes as unknown as [RowDataPacket[]];
       // Hitung agregat per invoice secara terpisah agar aman dari masalah GROUP BY
-      const data: Array<{ id: string; created_at: string; payment_method: string | null; grand_total: number; items_count: number; }> = [];
+      const data: Array<{ id: string; created_at: string; payment_method: string | null; grand_total: number; items_count: number; total_weight: number; }> = [];
       for (const r of rows || []) {
         const [[agg]] = await conn.query<RowDataPacket[]>(
-          `SELECT COALESCE(SUM(total_price), 0) AS grand_total, COUNT(id) AS items_count FROM invoice_items WHERE invoice_id = ?`,
+          `SELECT 
+             COALESCE(SUM(total_price), 0) AS grand_total, 
+             COUNT(id) AS items_count,
+             COALESCE(SUM(weight_kg), 0) AS total_weight
+           FROM invoice_items 
+           WHERE invoice_id = ?`,
           [r.id as string]
         );
         data.push({ 
@@ -511,7 +619,8 @@ export async function GET(req: NextRequest) {
           created_at: String(r.created_at),
           payment_method: (r.payment_method == null ? null : String(r.payment_method)),
           grand_total: Number((agg as RowDataPacket)?.grand_total || 0),
-          items_count: Number((agg as RowDataPacket)?.items_count || 0)
+          items_count: Number((agg as RowDataPacket)?.items_count || 0),
+          total_weight: Number((agg as RowDataPacket)?.total_weight || 0)
         });
       }
 

@@ -2,9 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/utils/db";
 import { cookies } from "next/headers";
 import { SESSION_COOKIE, verifySessionToken } from "@/utils/auth";
-import { retryUpload, ensureUploadWorkerStarted } from "@/utils/uploadWorker";
-
-ensureUploadWorkerStarted();
+import { retryUpload } from "@/utils/uploadWorker";
+// Mode manual: tidak memulai worker otomatis di endpoint ini
 
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const cookieStore = await cookies();

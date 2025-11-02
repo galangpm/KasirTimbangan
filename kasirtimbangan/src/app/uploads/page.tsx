@@ -12,6 +12,7 @@ type UploadRow = {
   status: string;
   progress: number;
   filename: string | null;
+  data_url: string | null;
   attempts: number;
   last_error: string | null;
   created_at: string;
@@ -29,8 +30,9 @@ export default function UploadsPage() {
   const [authChecked, setAuthChecked] = useState(false);
   const [rows, setRows] = useState<UploadRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<string>("");
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<string>("queued");
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
     const check = async () => {
@@ -77,6 +79,25 @@ export default function UploadsPage() {
     return () => clearInterval(t);
   }, [autoRefresh, fetchData]);
 
+  const sync = async () => {
+    setSyncing(true);
+    try {
+      const res = await fetch("/api/uploads/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 10 })
+      });
+      const data = await res.json();
+      if (!res.ok || data.ok === false) throw new Error(data?.error || "Gagal sinkronisasi");
+      useFlashStore.getState().show("success", `Memproses ${data.processed || 0} upload`);
+      fetchData();
+    } catch (e: unknown) {
+      useFlashStore.getState().show("error", getErrorMessage(e));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const retry = async (id: number) => {
     try {
       const res = await fetch(`/api/uploads/${id}`, {
@@ -93,13 +114,13 @@ export default function UploadsPage() {
     }
   };
 
-  const columns = ["ID", "Tanggal", "Invoice", "Item", "Jenis", "Progress", "Status", "File", "Kesalahan", "Aksi"];
+  const columns = ["ID", "Tanggal", "Invoice", "Item", "Jenis", "Preview", "Progress", "Status", "File", "Kesalahan", "Aksi"];
 
   return (
     <div className="p-4 space-y-4">
       <div className="neo-card p-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold">Upload Gambar (Background)</h2>
+          <h2 className="text-lg font-semibold">Upload Gambar (Manual Sync)</h2>
           <div className="flex items-center gap-2">
             <label className="text-sm">Status</label>
             <select className="neo-input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
@@ -110,6 +131,7 @@ export default function UploadsPage() {
               <option value="error">Error</option>
             </select>
             <button className="neo-button small" onClick={() => fetchData()} disabled={loading}>Refresh</button>
+            <button className="neo-button primary small" onClick={sync} disabled={loading || syncing}>{syncing ? "Syncing..." : "Sync"}</button>
             <label className="text-sm flex items-center gap-1 ml-2">
               <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> Auto Refresh
             </label>
@@ -131,10 +153,17 @@ export default function UploadsPage() {
               ) : rows.map((r) => (
                 <tr key={r.id} className="hover:bg-slate-50">
                   <td className="px-3 py-2 whitespace-nowrap">#{r.id}</td>
-                  <td className="px-3 py-2 whitespace-nowrap" suppressHydrationWarning>{new Date(r.created_at).toLocaleString("id-ID")}</td>
+                  <td className="px-3 py-2 whitespace-nowrap" suppressHydrationWarning>{new Date(r.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</td>
                   <td className="px-3 py-2 font-mono text-xs"><a className="text-blue-600 hover:underline" href={`/invoices/${r.invoice_id}`} target="_blank" rel="noreferrer">{r.invoice_id}</a></td>
                   <td className="px-3 py-2">{r.invoice_item_id ?? r.item_index ?? "-"}</td>
                   <td className="px-3 py-2">{r.kind}</td>
+                  <td className="px-3 py-2">
+                    {r.status === "queued" && r.data_url ? (
+                      <img src={r.data_url} alt={`inv ${r.invoice_id}`} style={{ width: 80, height: 80, objectFit: "cover", borderRadius: 4, border: "1px solid #e2e8f0" }} />
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
                       <div className="w-40 h-2 bg-slate-200 rounded overflow-hidden">

@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useFlashStore } from "@/store/flashStore";
 
@@ -199,39 +199,52 @@ function scheduleIdle(fn: () => void) {
 }
 
 function BarChart({ data }: { data: Array<{ label: string; value: number; avgWeightKg?: number }> }) {
-  const width = 480;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState<number>(480);
   const height = 240;
   const padding = 32;
   const bottomMargin = 40; // ruang ekstra di bawah chart untuk label agar tidak mepet dengan tepi card
   const axisBaselineY = height - padding - bottomMargin;
   const maxV = data.length ? Math.max(...data.map((d) => d.value)) : 1;
   const barWidth = Math.max(20, (width - 2 * padding) / Math.max(1, data.length) - 10);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0].contentRect;
+      setWidth(Math.max(320, Math.floor(cr.width)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   return (
-    <svg width={width} height={height} className="bg-white rounded border">
-      <line x1={padding} y1={axisBaselineY} x2={width - padding} y2={axisBaselineY} stroke="#cbd5e1" />
-      {data.map((d, i) => {
-        const x = padding + i * (barWidth + 10);
-        const h = (d.value / Math.max(1, maxV)) * (height - 2 * padding - bottomMargin);
-        const y = axisBaselineY - h;
-        return (
-          <g key={d.label}>
-            <rect x={x} y={y} width={barWidth} height={h} fill="#10b981" />
-            {/* Nilai pendapatan di atas bar */}
-            <text x={x + barWidth / 2} y={Math.max(y - 4, 12)} textAnchor="middle" fontSize={11} fill="#0f172a">
-              {formatCurrency(d.value)}
-            </text>
-            {/* Label buah */}
-            <text x={x + barWidth / 2} y={axisBaselineY + 16} textAnchor="middle" fontSize={12} fill="#334155">
-              {d.label}
-            </text>
-            {/* Berat rata-rata per buah di bawah label */}
-            <text x={x + barWidth / 2} y={axisBaselineY + 32} textAnchor="middle" fontSize={11} fill="#64748b">
-              {(d.avgWeightKg ?? 0).toFixed(2)} kg rata-rata
-            </text>
-          </g>
-        );
-      })}
-    </svg>
+    <div ref={containerRef} className="w-full">
+      <svg width={width} height={height} className="bg-white rounded border w-full">
+        <line x1={padding} y1={axisBaselineY} x2={width - padding} y2={axisBaselineY} stroke="#cbd5e1" />
+        {data.map((d, i) => {
+          const x = padding + i * (barWidth + 10);
+          const h = (d.value / Math.max(1, maxV)) * (height - 2 * padding - bottomMargin);
+          const y = axisBaselineY - h;
+          return (
+            <g key={d.label}>
+              <rect x={x} y={y} width={barWidth} height={h} fill="#10b981" />
+              {/* Nilai pendapatan di atas bar */}
+              <text x={x + barWidth / 2} y={Math.max(y - 4, 12)} textAnchor="middle" fontSize={11} fill="#0f172a">
+                {formatCurrency(d.value)}
+              </text>
+              {/* Label buah */}
+              <text x={x + barWidth / 2} y={axisBaselineY + 16} textAnchor="middle" fontSize={12} fill="#334155">
+                {d.label}
+              </text>
+              {/* Berat rata-rata per buah di bawah label */}
+              <text x={x + barWidth / 2} y={axisBaselineY + 32} textAnchor="middle" fontSize={11} fill="#64748b">
+                {(d.avgWeightKg ?? 0).toFixed(2)} kg rata-rata
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
   );
 }
 
@@ -420,12 +433,12 @@ export default function AnalyticsPage() {
 
       {/* Fruit charts & table */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <div className="neo-card p-4 lg:col-span-2">
+        <div className="neo-card p-4 lg:col-span-3">
           <div className="flex items-center justify-between mb-2">
             <div className="font-semibold">Top Buah per Pendapatan</div>
             <div className="text-xs text-slate-500">Periode: {dateFrom} s/d {dateTo}</div>
           </div>
-          <div className="overflow-x-auto hscroll-touch">
+          <div className="w-full">
             <BarChart data={fruitBars} />
           </div>
         </div>

@@ -27,6 +27,7 @@ type InvoiceItemRow = RowDataPacket & {
   weight_kg: number;
   price_per_kg: number;
   total_price: number;
+  quantity: number;
   image_data_url: string | null;
   full_image_data_url: string | null;
 };
@@ -92,7 +93,7 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
       }
 
       const [items] = await conn.query<InvoiceItemRow[]>(
-        `SELECT id, fruit, weight_kg, price_per_kg, total_price, image_data_url, full_image_data_url
+        `SELECT id, fruit, weight_kg, price_per_kg, total_price, quantity, image_data_url, full_image_data_url
          FROM invoice_items WHERE invoice_id = ? ORDER BY id ASC`,
         [id]
       )

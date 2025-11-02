@@ -29,6 +29,12 @@ export default function Sidebar() {
   const [role, setRole] = useState<"superadmin" | "kasir" | null>(null);
   const [username, setUsername] = useState<string | null>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [now, setNow] = useState<Date | null>(null);
+  useEffect(() => {
+    setNow(new Date());
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const items = useMemo<MenuItem[]>(() => {
     if (role === "superadmin") return [...BASE_ITEMS, { href: "/logs", label: "Log Aktivitas" }, { href: "/users", label: "Manajemen User" }];
     if (role === "kasir") return [
@@ -103,6 +109,9 @@ export default function Sidebar() {
       {role && (
         <div className="text-xs text-slate-500 mt-1">Masuk sebagai {username} ({role})</div>
       )}
+      <div className="mt-2 text-xs text-slate-600">
+        <div suppressHydrationWarning>{now ? now.toLocaleString("id-ID", { timeZone: "Asia/Jakarta" }) : ""}</div>
+      </div>
     </div>
     <nav className="flex-1 px-2 py-4">
           <div className="text-xs uppercase text-slate-500 px-3 mb-2">Operasional</div>

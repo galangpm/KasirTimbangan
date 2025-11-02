@@ -208,7 +208,7 @@ export default function UsersPage() {
                       <span className={`neo-badge ${u.role === "superadmin" ? "success" : "pending"}`}>{u.role}</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 whitespace-nowrap">{new Date(u.createdAt).toLocaleString("id-ID")}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{new Date(u.createdAt).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</td>
                   <td className="px-3 py-2">
                     {editId === u.id ? (
                       <div className="flex gap-2 items-center">

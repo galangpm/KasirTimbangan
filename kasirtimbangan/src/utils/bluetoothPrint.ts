@@ -204,3 +204,37 @@ export async function connectAndPrintTextAndQR(text: string, qrUuid: string) {
   const tail = enc.encode("\n\n");
   await writeChunks(ch, tail);
 }
+
+// Versi dengan cache characteristic dan penanganan error yang lebih informatif.
+// Gunakan ini untuk cetak otomatis setelah memilih pembayaran agar lebih stabil.
+let _cachedCharacteristic: BluetoothRemoteGATTCharacteristic | null = null;
+export function resetPrinterCache() { _cachedCharacteristic = null; }
+export function hasPrinterCache() { return !!_cachedCharacteristic; }
+export async function printReceiptWithBluetooth(text: string, qrUuid: string) {
+  const enc = new TextEncoder();
+  let ch = _cachedCharacteristic;
+  if (!ch) {
+    try {
+      ch = await findWritableCharacteristic();
+      _cachedCharacteristic = ch;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const name = (e as any)?.name || "";
+      if (name === "NotAllowedError" || msg.toLowerCase().includes("user gesture")) {
+        throw new Error("Izin Bluetooth diperlukan. Klik tombol 'Cetak Nota' secara manual untuk menyambungkan printer, lalu coba lagi.");
+      }
+      if (name === "NotFoundError" || msg.toLowerCase().includes("no devices found")) {
+        throw new Error("Perangkat printer BLE tidak ditemukan. Pastikan printer menyala dan dalam mode pairing.");
+      }
+      throw e as any;
+    }
+  }
+  // Inisialisasi printer
+  await writeChunks(ch, new Uint8Array([0x1B, 0x40]));
+  const textBytes = enc.encode(text + "\n\n");
+  await writeChunks(ch, textBytes);
+  const qrBytes = buildEscPosQrBytes(qrUuid, 6, "M");
+  await writeChunks(ch, qrBytes);
+  const tail = enc.encode("\n\n");
+  await writeChunks(ch, tail);
+}

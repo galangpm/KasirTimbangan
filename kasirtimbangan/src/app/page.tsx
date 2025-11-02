@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useInvoiceStore } from "@/store/invoiceStore";
 import type { InvoiceItem } from "@/store/invoiceStore";
-import CameraCapture from "@/components/CameraCapture";
+import CameraCapture from "@/components/CameraCaptureFixed";
 import PaymentModal from "@/components/PaymentModal";
 import { usePriceStore } from "@/store/priceStore";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
@@ -114,6 +114,7 @@ export default function Home() {
     }
   }, [prices]);
   const [fruit, setFruit] = useState<string>(Object.keys(prices)[0] ?? "apple");
+  const [itemCount, setItemCount] = useState<number>(1);
   const [capturedDataUrl, setCapturedDataUrl] = useState<string | null>(null);
   const [capturedFullDataUrl, setCapturedFullDataUrl] = useState<string | null>(null);
   const [imageModalUrl, setImageModalUrl] = useState<string | null>(null);
@@ -125,11 +126,36 @@ export default function Home() {
   const [previewText, setPreviewText] = useState("");
   const [previewQrUrl, setPreviewQrUrl] = useState<string | null>(null);
   const [lastInvoiceId, setLastInvoiceId] = useState<string>("");
+  const [lastInvoiceClientTs, setLastInvoiceClientTs] = useState<string>("");
   // Data customer
   const [customerName, setCustomerName] = useState<string>("");
   const [customerWhatsapp, setCustomerWhatsapp] = useState<string>("");
   // Cache settings agar tidak perlu fetch saat submit/cetak
   const [settingsCache, setSettingsCache] = useState<{ name: string; address: string; phone: string; receiptFooter: string } | null>(null);
+
+  // Estimasi jumlah barang di atas timbangan berdasarkan rata-rata berat per item untuk buah terpilih
+  const estimateQuantityOnScale = (totalWeightKg: number, fruitName: string): number => {
+    const weights = (items || [])
+      .filter((it: InvoiceItem) => String(it.fruit) === fruitName && Number(it.weightKg) > 0)
+      .map((it: InvoiceItem) => Number(it.weightKg));
+    const avgUnit = weights.length > 0 ? weights.reduce((a, b) => a + b, 0) / weights.length : 0;
+    if (avgUnit > 0 && Number.isFinite(totalWeightKg)) {
+      const raw = totalWeightKg / avgUnit;
+      const est = Math.max(1, Math.round(raw));
+      return est;
+    }
+    return 1; // fallback jika belum ada data atau berat tidak valid
+  };
+
+  // Isi otomatis input Qty ketika berat hasil OCR/koreksi manual berubah
+  useEffect(() => {
+    if (weightKg && weightKg > 0) {
+      try {
+        const est = estimateQuantityOnScale(weightKg, fruit);
+        if (Number.isFinite(est) && est >= 1) setItemCount(est);
+      } catch {}
+    }
+  }, [weightKg, fruit, items]);
   useEffect(() => {
     const loadSettings = async () => {
       try {
@@ -143,6 +169,7 @@ export default function Home() {
     };
     loadSettings();
   }, []);
+  // Dinonaktifkan: Vision-Count (OpenAI) — Qty sekarang manual
 
   // Generate QR untuk UUID ketika modal preview aktif
   useEffect(() => {
@@ -305,9 +332,11 @@ export default function Home() {
       weightKg: w,
       pricePerKg,
       totalPrice: total,
+      quantity: Math.max(1, Number.isFinite(itemCount) ? itemCount : 1),
       imageDataUrl: capturedDataUrl ?? undefined,
       fullImageDataUrl: capturedFullDataUrl ?? undefined,
     };
+    // Tambahkan satu baris item dengan Qty, jangan duplikasi baris
     addItem(item);
     setCapturedDataUrl(null);
     setCapturedFullDataUrl(null);
@@ -334,11 +363,13 @@ export default function Home() {
     }
     try {
       // Kirim foto full (tanpa crop) ke server; batasi ukuran agar aman
+      const clientTs = new Date().toISOString();
       const sanitizedItems = items.map((it: InvoiceItem) => ({
         fruit: it.fruit,
         weightKg: it.weightKg,
         pricePerKg: it.pricePerKg,
         totalPrice: it.totalPrice,
+        quantity: Number(it.quantity || 1),
         imageDataUrl:
           typeof it.imageDataUrl === "string" && it.imageDataUrl.length <= 500_000
             ? it.imageDataUrl
@@ -352,24 +383,30 @@ export default function Home() {
       const res = await fetch("/api/invoices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: sanitizedItems, customer: { name, whatsapp: hasWa ? waNorm : null } }),
+        body: JSON.stringify({
+          items: sanitizedItems,
+          customer: { name, whatsapp: hasWa ? waNorm : null },
+          clientTs,
+        }),
         cache: "no-store",
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Gagal menyimpan nota");
       const invId: string = String(json?.invoice?.id || "");
       setLastInvoiceId(invId);
+      setLastInvoiceClientTs(clientTs);
 
       // Cache lokal detail invoice untuk akses cepat selama 24 jam
       try {
         cacheSet(invId, {
-          invoice: { id: invId, created_at: new Date().toISOString(), payment_method: null },
+          invoice: { id: invId, created_at: clientTs, payment_method: null },
           items: items.map((it: InvoiceItem) => ({
             id: "",
             fruit: it.fruit,
             weight_kg: it.weightKg,
             price_per_kg: it.pricePerKg,
             total_price: it.totalPrice,
+            quantity: Number(it.quantity || 1),
             image_data_url: it.imageDataUrl ?? null,
             full_image_data_url: it.fullImageDataUrl ?? null,
           })),
@@ -378,20 +415,22 @@ export default function Home() {
 
       // Bangun preview teks dari items lokal dan cache settings (tanpa fetch tambahan)
       const localData = {
-        invoice: { id: invId, created_at: new Date().toISOString(), payment_method: null },
+        invoice: { id: invId, created_at: clientTs, payment_method: null },
         items: items.map((it: InvoiceItem) => ({
           id: "",
           fruit: it.fruit,
           weight_kg: it.weightKg,
           price_per_kg: it.pricePerKg,
           total_price: it.totalPrice,
+          quantity: Number(it.quantity || 1),
         })),
       };
       const text = buildReceipt58(localData, settingsCache, cashierName, name);
       setPreviewText(text);
-      // Tampilkan Preview Nota dulu, termasuk QR UUID, sebelum menuju pembayaran
-      setShowPreview(true);
-      // Jangan langsung buka pembayaran agar tidak menghambat alur
+      // Bersihkan daftar item di kasir setelah simpan berhasil
+      try { newInvoice(); } catch {}
+      // Alihkan otomatis ke halaman detail nota dengan Payment terbuka
+      router.push(`/invoices/${invId}?pay=1`);
     } catch (e: unknown) {
       useFlashStore.getState().show("error", getErrorMessage(e));
     }
@@ -413,7 +452,7 @@ export default function Home() {
             className="neo-button primary"
             onClick={handleSubmit}
           >
-            Simpan & Bayar
+            Simpan
           </button>
         </div>
 
@@ -476,6 +515,21 @@ export default function Home() {
               }}
             />
             <p className="text-xs text-slate-500 mt-1">Masukkan desimal dengan titik, contoh: 0.750</p>
+          </div>
+          <div>
+            <label className="text-sm">Jumlah Buah</label>
+            <input
+              type="number"
+              min={1}
+              className="neo-input w-full font-mono"
+              placeholder="1"
+              value={itemCount}
+              onChange={(e) => {
+                const val = parseInt(e.target.value || "1", 10);
+                setItemCount(Number.isNaN(val) ? 1 : Math.max(1, val));
+              }}
+            />
+            <p className="text-xs text-slate-500 mt-1">Akan menambahkan beberapa item sekaligus sesuai jumlah.</p>
           </div>
         </div>
         <div className="flex gap-2 mb-4">
@@ -573,6 +627,8 @@ export default function Home() {
                       Berat (kg): <span className="font-medium">{Number(it.weightKg || 0).toFixed(3)}</span>
                       <br />
                       Harga/kg: <span className="font-medium">Rp {Number(it.pricePerKg || 0).toLocaleString("id-ID")},-</span>
+                      <br />
+                      Qty: <span className="font-medium">{Number(it.quantity || 1)}</span>
                     </div>
                     <div className="text-right">
                       <div className="text-s md:text-1xl font-bold">
@@ -610,7 +666,7 @@ export default function Home() {
 
               // Bangun teks nota dari data lokal dan cache settings (tanpa fetch tambahan)
               const localData2 = {
-                invoice: { id, created_at: new Date().toISOString(), payment_method: m, notes: notes ?? null },
+                invoice: { id, created_at: lastInvoiceClientTs || new Date().toISOString(), payment_method: m, notes: notes ?? null },
                 items: items.map((it: InvoiceItem) => ({
                   id: "",
                   fruit: it.fruit,

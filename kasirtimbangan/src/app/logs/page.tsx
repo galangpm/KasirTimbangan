@@ -187,7 +187,7 @@ export default function LogsPage() {
                 <tr><td className="p-3" colSpan={columns.length}>Tidak ada data</td></tr>
               ) : rows.map((r) => (
                 <tr key={r.id}>
-                  <td className="p-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>
+                  <td className="p-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })}</td>
                   <td className="p-2">{r.username || r.user_id}</td>
                   <td className="p-2">{r.action}</td>
                   <td className="p-2">{r.invoice_id ? (<Link href={`/invoices/${r.invoice_id}`}>{r.invoice_id}</Link>) : (<em>—</em>)}</td>

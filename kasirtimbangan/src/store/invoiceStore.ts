@@ -6,6 +6,7 @@ export type InvoiceItem = {
   weightKg: number;
   pricePerKg: number;
   totalPrice: number;
+  quantity?: number;
   imageDataUrl?: string;
   fullImageDataUrl?: string;
 };
