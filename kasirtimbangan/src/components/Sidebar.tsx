@@ -40,7 +40,6 @@ export default function Sidebar() {
     if (role === "kasir") return [
       { href: "/", label: "Kasir" },
       { href: "/kasir/invoices", label: "Invoice Saya" },
-      { href: "/uploads", label: "Upload Gambar" },
       { href: "/debug/printer-bluetooth", label: "Debug Printer Bluetooth" },
     ];
     return [{ href: "/login", label: "Login" }];
